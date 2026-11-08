@@ -15,23 +15,38 @@
 
 ## 协议编解码
 
-### bedrock-protocol（EndstoneMC）
+### 当前 mod：自写代码，无第三方 codec
+
+`mod/JERCPLD.Mod/src/JerCpldMod.cpp` 中的协议读写全部为手写 C++：变长整数、字符串、NBT 跳过、包字段插入/裁剪、PlayerList 重写等，未链接或包含任何第三方协议编解码库。
+
+### bedrock-protocol（EndstoneMC）— 计划中，当前未使用
 
 - 项目：https://github.com/EndstoneMC/bedrock-protocol
 - 许可：MIT
-- 版权：The Endstone Project 及其贡献者
-- 使用方式：使用其 `bpc` 生成的 C++ codec（仅依赖标准库），生成的代码保留原始 MIT 许可与版权声明。当前处于接入阶段（S3）。
+- 状态：`docs/ROADMAP.md` 的 S3（固定版本 C++ codec）仍为待办；**当前 mod 二进制不包含 `bpc` 生成的任何代码**。
+- 注意：`tools/verify-client/` 使用的是 PrismarineJS 的 Node 包 `bedrock-protocol`（同名但不同项目，MIT），仅用于自动验证，不进入 mod。
 
 ### endweave（EndstoneMC）
 
 - 项目：https://github.com/EndstoneMC/endweave
 - 许可：Apache-2.0
-- 使用方式：仅参考其按版本划分的差异目录结构与纯函数式重写思路；**不复用其路由与链式翻译架构**。若移植其代码或数据结构，对应文件头必须注明：
+- 使用方式：**未引用其代码**。仅在 `docs/DESIGN.md` 中参考其按版本划分差异的思路；当前实现为单文件直线式翻译，不存在 endweave 源码或数据结构。
 
-```
-Modified for JERCPLD
-Original: https://github.com/EndstoneMC/endweave (Apache-2.0)
-```
+## 验证工具依赖（不进入 mod 二进制）
+
+| 组件 | 版本 | 许可 | 用途 |
+| --- | --- | --- | --- |
+| bedrock-protocol（PrismarineJS） | 3.61.0 | MIT | 模拟客户端 / 包解析验证 |
+| minecraft-data | 3.119.0 | MIT | 1.26.51 / 1.26.60 包结构与方块物品表对比 |
+| protodef | 1.19.0 | MIT | bedrock-protocol 的序列化依赖 |
+| nethernet | 1.1.2 | MIT | 模拟客户端的 NetherNet 传输 |
+| raknet-native | 1.2.3 | ISC | 模拟客户端的 RakNet 传输 |
+
+## 数据文件来源
+
+- mod 运行时不内置方块表、物品表、生物群系定义：这些数据由 BDS 在 `StartGame`（`block_properties`）、`ItemRegistry`（162）、`BiomeDefinitionList`（122）中下发，mod 只做字段级翻译。
+- 文档中的 2193/2225 方块与物品差集数字来自 `minecraft-data`（MIT）的 1.26.51 / 1.26.60 数据，仅用于分析与验证，不随 mod 分发。
+- 协议字段定义参考 Mojang 官方 `https://mojang.github.io/bedrock-protocol-docs/`，仅作为文档依据，不包含其代码。
 
 ## 构建期头文件依赖
 

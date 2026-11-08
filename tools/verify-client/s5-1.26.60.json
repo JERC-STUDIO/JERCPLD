@@ -1,0 +1,29 @@
+{
+  "ok": true,
+  "code": 0,
+  "reason": "start_game + chunks received",
+  "target": {
+    "host": "127.0.0.1",
+    "port": 19132,
+    "mcVersion": "1.26.60",
+    "transport": "nethernet"
+  },
+  "stages": {
+    "connected": true,
+    "loginSent": true,
+    "joined": true,
+    "startGame": true,
+    "spawn": false,
+    "chunks": 50
+  },
+  "timing": {
+    "startGameMs": 3919,
+    "firstChunkMs": 4120
+  },
+  "compression": "deflate",
+  "levelName": null,
+  "blockPropertyCount": 1295,
+  "kick": null,
+  "error": null,
+  "elapsedMs": 4125
+}

@@ -26,7 +26,7 @@ $configPath = Join-Path $configDir 'config.json'
 if (-not (Test-Path $configPath)) {
     $config = @'
 {
-  "translationEnabled": false,
+  "translationEnabled": true,
   "serverVersion": "1.26.51",
   "serverProtocol": 2193,
   "acceptMinProtocol": 1001,

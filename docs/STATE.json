@@ -3,27 +3,27 @@
   "project": "JERCPLD",
   "form": "LeviLamina native C++ mod (in-process BDS plugin)",
   "goal": "26.30-26.62 clients can join BDS 1.26.50/1.26.51 and fully enter the world",
-  "currentItem": "S4",
+  "currentItem": "S5",
   "status": "in_progress",
-  "lastUpdated": "2026-11-08T22:00:00+08:00",
+  "lastUpdated": "2026-11-09T02:15:00+08:00",
   "blockedReason": null,
   "items": [
-    { "id": "S1", "title": "最小自检客户端（握手→StartGame→PASS）", "status": "completed", "acceptance": "RakNet 路径实测通过：1.9s 收到 StartGame，1295 个方块属性", "note": "BDS 1.26.51 启动明确警告 RakNet 不是受支持的传输；该结论仅本机自检，生产必须 NetherNet" },
-    { "id": "S2", "title": "可交付形态：mod 被真实 BDS 加载 + 一键安装 + 启动横幅", "status": "completed", "acceptance": "2026-11-08 21:57 真实 BDS 1.26.51 加载成功，日志出现横幅与 [JERCPLD] loaded v0.1.0" },
+    { "id": "S1", "title": "最小自检客户端（握手→StartGame→PASS）", "status": "completed", "acceptance": "RakNet 路径实测通过：1.9s 收到 StartGame，1295 个方块属性", "note": "仅本机自检；生产走 NetherNet" },
+    { "id": "S2", "title": "可交付形态：mod 被真实 BDS 加载 + 一键安装 + 启动横幅", "status": "completed", "acceptance": "真实 BDS 1.26.51 加载成功，横幅与 [JERCPLD] loaded 行可见" },
     { "id": "S3", "title": "bedrock-protocol C++ codec 固定版本并构建", "status": "pending", "acceptance": "固定版本+SHA256，链接成功，static_assert 覆盖包 ID" },
-    { "id": "S4", "title": "Login/RequestNetworkSettings/NetworkSettings/StartGame 协议号改写", "status": "in_progress", "acceptance": "2225 客户端通过版本校验，进到 StartGame 之前不被打回（RakNet 自检），NetherNet 待真实客户端复核" },
-    { "id": "S5", "title": "翻译正确性：多版本进入、地形/方块/物品/实体降级、每版本对独立差异表", "status": "pending", "acceptance": "每条版本对独立差异表 + 可复现验证记录" },
-    { "id": "S6", "title": "诊断：会话包序列导出", "status": "pending", "acceptance": "能定位到具体包，导出文件可直接提供" },
+    { "id": "S4", "title": "Login/RequestNetworkSettings 协议号改写（原始包层）", "status": "completed", "acceptance": "2026-11-08 23:5x 实测：26.60 客户端经 NetherNet 完成登录并收到 StartGame（约 4s），无踢出", "note": "关键修复：在 NetworkConnection::receivePacket 反序列化前改写 2225->2193；处理层改写会让 Login 的 mConnectionRequest 为空" },
+    { "id": "S5", "title": "翻译正确性：StartGame/登录序列 + 区块地形 + 移动", "status": "in_progress", "acceptance": "26.62 客户端已进入世界（2026-11-09 确认）；移动/交互待真实客户端验收", "note": "2026-11-09 02:0x：真实 26.62 客户端确认已进入世界。02:04:30-02:05:37 会话 session-3/4 显示：c2s player_auth_input ×1125、subchunk_request ×120，s2c subchunk ×120、level_chunk ×600，移动与地形链路工作；客户端在首次 animate(44) 后被服务端 malformed 踢出（reason 56，violation packetId 44）。已实现 c2s animate 尾部 hand(u8) 裁剪，模拟客户端发送 3 次 animate 回归：kicked=false、violation=false、hook.log 记录 newLen=14。待真实客户端复测攻击/挖掘/开门。" },
+    { "id": "S6", "title": "诊断：会话包序列导出（mod 内置抓包）", "status": "completed", "acceptance": "配置开关、按会话分文件、大小上限与轮转、包 ID 白名单、十六进制内容；运行中热读取配置生效", "note": "2026-11-09 00:4x 实测：session-<n>-<c2s|s2c>.log、8MB 轮转 .1/.2、whitelist 空=全量、hex 完整、热读取无需重启。注意：单个 >1MB 出站包在抓包文件中可能只是分片，离线解码会失败（如 crafting_data），需结合客户端 violation 判断" },
     { "id": "S7", "title": "热路径压测", "status": "pending", "acceptance": "docs/PERF.md 数字可复现" }
   ],
   "cancelled": [
     { "id": "C1", "title": "NetherNet 自实现（发现/信令/SDP/ICE/DTLS/SCTP/P-384/分片）", "status": "cancelled", "reason": "形态改为 LeviLamina 进程内插件，传输由 BDS 负责，插件不接触 NetherNet；时间转入 S5" }
   ],
   "notes": {
-    "server": "BDS 1.26.51, LeviLamina 26.51.5, transport=raknet (临时测试配置)",
-    "serverProperties": "online-mode=false, server-port=19132, transport=raknet, compression-algorithm=zlib, block-network-ids-are-hashes=true；备份 server.properties.bak-jercpld-20261108-212343",
-    "modSource": "mod/JERCPLD.Mod/src/JerCpldMod.cpp (skeleton, build in progress)",
-    "modsDir": "plugins/ (LeviLamina 26.x)；JERCPLD 尚未安装",
+    "server": "BDS 1.26.51, LeviLamina 26.51.5, transport=nethernet, online-mode=false",
+    "serverProperties": "online-mode=false, server-port=19132, transport=nethernet, compression-algorithm=zlib, block-network-ids-are-hashes=true；备份 server.properties.bak-jercpld-20261108-212343",
+    "modSource": "mod/JERCPLD.Mod/src/JerCpldMod.cpp",
+    "modsDir": "plugins/JERCPLD（已安装，DLL 与 config 均为最新）",
     "legacyCSharp": "src/ 与 dist/win-x64/JERCPLD.exe 保留但不分发，含 ArkMirage GPL-3.0",
     "verificationBoundary": "S1 结论仅覆盖 RakNet；NetherNet 路径必须真实客户端复核"
   }

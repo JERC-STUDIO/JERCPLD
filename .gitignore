@@ -35,6 +35,7 @@ third_party/Cache/
 
 # 运行期产物与日志
 captures/
+diagnostics/
 logs/
 *.log
 *.dmp

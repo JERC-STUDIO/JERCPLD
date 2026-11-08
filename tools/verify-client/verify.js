@@ -25,7 +25,10 @@ function parseArgs (argv) {
     offline: true,
     timeout: 60000,
     requireChunks: 0,
-    jsonOut: null
+    jsonOut: null,
+    dwellMs: 0,
+    packetLog: null,
+    move: false
   }
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
@@ -41,6 +44,11 @@ function parseArgs (argv) {
       case '--require-chunks': out.requireChunks = Number(next()); break
       case '--json-out': out.jsonOut = next(); break
       case '--network-id': out.networkId = BigInt(next()); break
+      case '--dump-login': out.dumpLogin = true; break
+      case '--spoof-game-version': out.spoofGameVersion = next(); break
+      case '--dwell-ms': out.dwellMs = Number(next()); break
+      case '--packet-log': out.packetLog = next(); break
+      case '--move': out.move = true; break
       case '--help':
         console.log('node verify.js --host <ip> --port <port> --version <mc-version> [--transport raknet|nethernet] [--offline false] [--timeout ms]')
         process.exit(0)
@@ -128,6 +136,55 @@ function finish (code, reason) {
   process.exit(code)
 }
 
+function scheduleDwell () {
+  if (args.dwellMs <= 0 || dwellScheduled) return
+  dwellScheduled = true
+  log('DWELL', `keeping connection for ${args.dwellMs} ms`)
+  if (args.move) startMovement()
+  setTimeout(() => finish(0, `dwell ${args.dwellMs} ms complete`), args.dwellMs)
+}
+
+let dwellScheduled = false
+let moveTimer = null
+
+function startMovement () {
+  const start = client.startGameData?.player_position || { x: 0, y: 64, z: 0 }
+  let tick = 0n
+  let step = 0
+  moveTimer = setInterval(() => {
+    try {
+      step++
+      const x = start.x + (step % 40) * 0.1
+      client.queue('player_auth_input', {
+        pitch: 0,
+        yaw: 0,
+        position: { x, y: start.y, z: start.z },
+        move_vector: { x: 0.1, z: 0 },
+        head_yaw: 0,
+        input_data: [],
+        input_mode: 'mouse',
+        play_mode: 'normal',
+        interaction_model: 'crosshair',
+        interact_rotation: { x: 0, z: 0 },
+        tick,
+        delta: { x: 0, y: 0, z: 0 },
+        transaction: null,
+        item_stack_request: null,
+        block_action: null,
+        vehicle_rotation: null,
+        predicted_vehicle: null,
+        analogue_move_vector: { x: 0, z: 0 },
+        camera_orientation: { x: 0, y: 0, z: 0 },
+        raw_move_vector: { x: 0, z: 0 }
+      })
+      tick += 1n
+      if (step % 20 === 0) log('MOVE', `step=${step} x=${x.toFixed(2)}`)
+    } catch (e) {
+      log('MOVE_ERROR', String(e.message || e))
+    }
+  }, 100)
+}
+
 const timer = setTimeout(() => {
   if (!stages.startGame) finish(3, 'timeout waiting for start_game')
   else if (stages.chunks < args.requireChunks) finish(4, `timeout waiting for level_chunk (${stages.chunks}/${args.requireChunks})`)
@@ -157,10 +214,42 @@ try {
   finish(1, 'createClient failed')
 }
 
+if (args.spoofGameVersion) {
+  client.options.version = args.spoofGameVersion
+  console.log('SPOOF GameVersion=' + args.spoofGameVersion + ' (protocol stays ' + client.options.protocolVersion + ')')
+}
+
+if (args.dumpLogin) {
+  const origWrite = client.write.bind(client)
+  client.write = (name, params, ...rest) => {
+    if (name === 'login' && params) {
+      const tokens = params.tokens || {}
+      console.log('DUMP login protocol=' + params.protocol_version)
+      console.log('DUMP identity(type=' + typeof tokens.identity + ',len=' + String(tokens.identity || '').length + ')=' + String(tokens.identity || '').slice(0, 600))
+      console.log('DUMP client(len=' + String(tokens.client || '').length + ')=' + String(tokens.client || '').slice(0, 600))
+    }
+    return origWrite(name, params, ...rest)
+  }
+}
+
 client.on('connect_allowed', () => {
   stages.connected = true
   log('TCP/UDP', 'connect_allowed')
 })
+
+if (args.packetLog) {
+  const fs = require('fs')
+  fs.writeFileSync(args.packetLog, '')
+  client.on('packet', (p) => {
+    try {
+      const name = p?.data?.name || 'unknown'
+      const params = p?.data?.params
+      let approx = 0
+      try { approx = params ? JSON.stringify(params).length : 0 } catch {}
+      fs.appendFileSync(args.packetLog, `${new Date().toISOString()} ${name} approx_json=${approx}\n`)
+    } catch {}
+  })
+}
 
 client.on('loggingIn', () => {
   stages.loginSent = true
@@ -184,7 +273,7 @@ client.on('start_game', (packet) => {
   stages.levelName = packet.level_name ?? null
   stages.blockProperties = Array.isArray(packet.block_properties) ? packet.block_properties.length : null
   log('START_GAME', `level=${stages.levelName} blockProperties=${stages.blockProperties} runtimeEntityId=${packet.runtime_entity_id}`)
-  if (args.requireChunks === 0) finish(0, 'start_game received (minimal self-check)')
+  if (args.requireChunks === 0 && args.dwellMs <= 0) finish(0, 'start_game received (minimal self-check)')
 })
 
 client.on('level_chunk', () => {
@@ -192,10 +281,11 @@ client.on('level_chunk', () => {
   if (stages.chunks === 1) {
     stages.firstChunkAt = Date.now()
     log('CHUNK', 'first level_chunk received')
+    if (args.dwellMs > 0) scheduleDwell()
   } else if (stages.chunks % 16 === 0) {
     log('CHUNK', `${stages.chunks} chunks`)
   }
-  if (stages.startGame && stages.chunks >= args.requireChunks) {
+  if (stages.startGame && stages.chunks >= args.requireChunks && args.dwellMs <= 0) {
     finish(0, 'start_game + chunks received')
   }
 })
@@ -203,6 +293,7 @@ client.on('level_chunk', () => {
 client.on('spawn', () => {
   stages.spawn = true
   log('SPAWN', 'player spawned')
+  if (args.dwellMs > 0) scheduleDwell()
 })
 
 client.on('kick', (packet) => {
