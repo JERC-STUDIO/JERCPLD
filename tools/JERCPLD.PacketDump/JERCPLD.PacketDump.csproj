@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>JERCPLD.PacketDump</RootNamespace>
+    <AssemblyName>jercpld-dump</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\JERCPLD.Core\JERCPLD.Core.csproj" />
+    <ProjectReference Include="..\..\src\JERCPLD.Protocol\JERCPLD.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\JERCPLD.Codec\JERCPLD.Codec.csproj" />
+  </ItemGroup>
+</Project>

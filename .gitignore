@@ -1,0 +1,61 @@
+# 构建产物
+bin/
+obj/
+build/
+dist/
+out/
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.class
+
+# .NET / IDE
+.vs/
+.vscode/
+*.user
+*.suo
+*.userprefs
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# 第三方依赖下载缓存（由 fetch-deps.ps1 重新获取）
+mod/JERCPLD.Mod/deps/
+third_party/Binaries/
+third_party/Cache/
+
+# 运行期产物与日志
+captures/
+logs/
+*.log
+*.dmp
+crashdump/
+
+# BDS 世界与运行目录
+worlds/
+Bedrock_Server/
+bedrock_server/
+plugins/JERCPLD/
+
+# 密钥与本地配置
+.env
+.env.*
+*.secret
+secrets/
+**/config.local.json
+*.pem
+*.pfx
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini

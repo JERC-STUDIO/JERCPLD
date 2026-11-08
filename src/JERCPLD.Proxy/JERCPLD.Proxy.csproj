@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>JERCPLD.Proxy</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\JERCPLD.Core\JERCPLD.Core.csproj" />
+    <ProjectReference Include="..\JERCPLD.Protocol\JERCPLD.Protocol.csproj" />
+    <ProjectReference Include="..\JERCPLD.Codec\JERCPLD.Codec.csproj" />
+    <ProjectReference Include="..\JERCPLD.VersionMap\JERCPLD.VersionMap.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>JERCPLD.Cli</RootNamespace>
+    <AssemblyName>jercpld</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\JERCPLD.Core\JERCPLD.Core.csproj" />
+    <ProjectReference Include="..\JERCPLD.RakNet\JERCPLD.RakNet.csproj" />
+    <ProjectReference Include="..\JERCPLD.NetherNet\JERCPLD.NetherNet.csproj" />
+    <ProjectReference Include="..\JERCPLD.VersionMap\JERCPLD.VersionMap.csproj" />
+    <ProjectReference Include="..\JERCPLD.Proxy\JERCPLD.Proxy.csproj" />
+  </ItemGroup>
+</Project>

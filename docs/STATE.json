@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "project": "JERCPLD",
+  "form": "LeviLamina native C++ mod (in-process BDS plugin)",
+  "goal": "26.30-26.62 clients can join BDS 1.26.50/1.26.51 and fully enter the world",
+  "currentItem": "S4",
+  "status": "in_progress",
+  "lastUpdated": "2026-11-08T22:00:00+08:00",
+  "blockedReason": null,
+  "items": [
+    { "id": "S1", "title": "最小自检客户端（握手→StartGame→PASS）", "status": "completed", "acceptance": "RakNet 路径实测通过：1.9s 收到 StartGame，1295 个方块属性", "note": "BDS 1.26.51 启动明确警告 RakNet 不是受支持的传输；该结论仅本机自检，生产必须 NetherNet" },
+    { "id": "S2", "title": "可交付形态：mod 被真实 BDS 加载 + 一键安装 + 启动横幅", "status": "completed", "acceptance": "2026-11-08 21:57 真实 BDS 1.26.51 加载成功，日志出现横幅与 [JERCPLD] loaded v0.1.0" },
+    { "id": "S3", "title": "bedrock-protocol C++ codec 固定版本并构建", "status": "pending", "acceptance": "固定版本+SHA256，链接成功，static_assert 覆盖包 ID" },
+    { "id": "S4", "title": "Login/RequestNetworkSettings/NetworkSettings/StartGame 协议号改写", "status": "in_progress", "acceptance": "2225 客户端通过版本校验，进到 StartGame 之前不被打回（RakNet 自检），NetherNet 待真实客户端复核" },
+    { "id": "S5", "title": "翻译正确性：多版本进入、地形/方块/物品/实体降级、每版本对独立差异表", "status": "pending", "acceptance": "每条版本对独立差异表 + 可复现验证记录" },
+    { "id": "S6", "title": "诊断：会话包序列导出", "status": "pending", "acceptance": "能定位到具体包，导出文件可直接提供" },
+    { "id": "S7", "title": "热路径压测", "status": "pending", "acceptance": "docs/PERF.md 数字可复现" }
+  ],
+  "cancelled": [
+    { "id": "C1", "title": "NetherNet 自实现（发现/信令/SDP/ICE/DTLS/SCTP/P-384/分片）", "status": "cancelled", "reason": "形态改为 LeviLamina 进程内插件，传输由 BDS 负责，插件不接触 NetherNet；时间转入 S5" }
+  ],
+  "notes": {
+    "server": "BDS 1.26.51, LeviLamina 26.51.5, transport=raknet (临时测试配置)",
+    "serverProperties": "online-mode=false, server-port=19132, transport=raknet, compression-algorithm=zlib, block-network-ids-are-hashes=true；备份 server.properties.bak-jercpld-20261108-212343",
+    "modSource": "mod/JERCPLD.Mod/src/JerCpldMod.cpp (skeleton, build in progress)",
+    "modsDir": "plugins/ (LeviLamina 26.x)；JERCPLD 尚未安装",
+    "legacyCSharp": "src/ 与 dist/win-x64/JERCPLD.exe 保留但不分发，含 ArkMirage GPL-3.0",
+    "verificationBoundary": "S1 结论仅覆盖 RakNet；NetherNet 路径必须真实客户端复核"
+  }
+}

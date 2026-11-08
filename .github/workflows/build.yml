@@ -1,0 +1,34 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Fetch mod dependencies
+        shell: pwsh
+        run: ./mod/JERCPLD.Mod/fetch-deps.ps1
+
+      - name: Fetch LeviLamina headers
+        shell: pwsh
+        run: |
+          $version = '26.51.5'
+          curl.exe -L --fail --retry 3 -o ll.zip "https://github.com/LiteLDev/LeviLamina/archive/refs/tags/v$version.zip"
+          Expand-Archive ll.zip -DestinationPath .
+          "LEVILAMINA_SRC=$PWD/LeviLamina-$version/src" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Compile mod (compile-only)
+        shell: cmd
+        run: mod\JERCPLD.Mod\ci-compile.bat
+
+      - name: Run translation tests
+        run: dotnet run --project tests\JERCPLD.Translation.Tests\JERCPLD.Translation.Tests.csproj -c Release

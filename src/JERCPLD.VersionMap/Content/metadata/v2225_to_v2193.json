@@ -1,0 +1,16 @@
+{
+  "source": 2225,
+  "target": 2193,
+  "verified": false,
+  "note": "槽位布局基于社区常见约定，尚未用真实 2193 包体验证；上线前必须校正",
+  "remap": {},
+  "defaults": [
+    { "id": 0, "kind": "Byte", "value": 0 },
+    { "id": 1, "kind": "Short", "value": 0 },
+    { "id": 2, "kind": "String", "value": "" },
+    { "id": 3, "kind": "Byte", "value": 1 },
+    { "id": 4, "kind": "Byte", "value": 0 },
+    { "id": 5, "kind": "Byte", "value": 0 },
+    { "id": 6, "kind": "Int", "value": 0 }
+  ]
+}

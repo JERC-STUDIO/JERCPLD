@@ -1,0 +1,151 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:JERCPLD.Desktop.ViewModels"
+        x:Class="JERCPLD.Desktop.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Width="1180" Height="780"
+        MinWidth="980" MinHeight="680"
+        Title="JERCPLD · Minecraft 基岩版跨版本翻译代理"
+        WindowStartupLocation="CenterScreen"
+        Background="#14161A">
+  <Grid RowDefinitions="Auto,Auto,Auto,Auto,*" Margin="16">
+    <!-- 能力边界横幅：如实标注未实现能力 -->
+    <Border Grid.Row="0" Background="#3A2A12" BorderBrush="#7A5A20" BorderThickness="1"
+            CornerRadius="6" Padding="12,10" Margin="0,0,0,12">
+      <TextBlock Text="{Binding CapabilityBanner}" Foreground="#F0C674" TextWrapping="Wrap" FontSize="13" />
+    </Border>
+
+    <!-- 配置区 -->
+    <Border Grid.Row="1" Background="#1C1F24" CornerRadius="8" Padding="16" Margin="0,0,0,12">
+      <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="18" RowSpacing="10">
+        <StackPanel Grid.Row="0" Grid.Column="0" Spacing="4">
+          <TextBlock Text="传输模式" Foreground="#9AA0A6" FontSize="12" />
+          <ComboBox ItemsSource="{Binding TransportModes}" SelectedIndex="{Binding SelectedTransportIndex}"
+                    HorizontalAlignment="Stretch" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="0" Grid.Column="1" Spacing="4">
+          <TextBlock Text="NetherNet 接入方式" Foreground="#9AA0A6" FontSize="12" />
+          <ComboBox ItemsSource="{Binding NetherNetListenModes}" SelectedIndex="{Binding SelectedListenModeIndex}"
+                    HorizontalAlignment="Stretch" IsEnabled="{Binding IsNetherNetMode}" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Grid.Column="0" Spacing="4">
+          <TextBlock Text="客户端版本（旧版侧）" Foreground="#9AA0A6" FontSize="12" />
+          <ComboBox ItemsSource="{Binding ClientVersions}"
+                    SelectedItem="{Binding SelectedClientVersion}"
+                    HorizontalAlignment="Stretch">
+            <ComboBox.ItemTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding Display}" />
+              </DataTemplate>
+            </ComboBox.ItemTemplate>
+          </ComboBox>
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Grid.Column="1" Spacing="4">
+          <TextBlock Text="服务端版本（BDS 侧）" Foreground="#9AA0A6" FontSize="12" />
+          <ComboBox ItemsSource="{Binding ServerVersions}"
+                    SelectedItem="{Binding SelectedServerVersion}"
+                    HorizontalAlignment="Stretch">
+            <ComboBox.ItemTemplate>
+              <DataTemplate>
+                <TextBlock Text="{Binding Display}" />
+              </DataTemplate>
+            </ComboBox.ItemTemplate>
+          </ComboBox>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" Grid.Column="0" Spacing="4">
+          <TextBlock Text="监听地址（NetherNet：UDP 7551 或 HTTP 端口；RakNet：UDP）" Foreground="#9AA0A6" FontSize="12" />
+          <TextBox Text="{Binding ListenEndPoint}" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" Grid.Column="1" Spacing="4">
+          <TextBlock Text="上游 BDS：HTTP 信令地址 / 局域网发现自动查找" Foreground="#9AA0A6" FontSize="12" />
+          <TextBox Text="{Binding UpstreamEndPoint}" />
+          <ComboBox ItemsSource="{Binding NetherNetUpstreamModes}"
+                    SelectedIndex="{Binding SelectedUpstreamModeIndex}"
+                    HorizontalAlignment="Stretch" IsEnabled="{Binding IsNetherNetMode}" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="3" Grid.Column="0" Spacing="4">
+          <TextBlock Text="服务器列表 MOTD" Foreground="#9AA0A6" FontSize="12" />
+          <TextBox Text="{Binding Motd}" />
+        </StackPanel>
+
+        <Grid Grid.Row="3" Grid.Column="1" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="12">
+          <StackPanel Grid.Column="0" Spacing="4">
+            <TextBlock Text="最大人数" Foreground="#9AA0A6" FontSize="12" />
+            <TextBox Text="{Binding MaxPlayersText}" />
+          </StackPanel>
+          <CheckBox Grid.Column="1" Content="记录包诊断"
+                    IsChecked="{Binding DiagnosticsEnabled}" VerticalAlignment="Bottom" Margin="0,0,0,6" />
+          <CheckBox Grid.Column="2" Content="仅直通（不翻译）"
+                    IsChecked="{Binding PassthroughMode}" VerticalAlignment="Bottom" Margin="0,0,0,6" />
+        </Grid>
+      </Grid>
+    </Border>
+
+    <!-- 操作与状态 -->
+    <Grid Grid.Row="2" ColumnDefinitions="Auto,Auto,Auto,*,Auto" ColumnSpacing="12" Margin="0,0,0,12">
+      <Button Grid.Column="0" Content="启动代理" Command="{Binding StartCommand}" IsEnabled="{Binding CanStart}"
+              MinWidth="120" Padding="16,10" Background="#2D6CDF" Foreground="White" />
+      <Button Grid.Column="1" Content="停止代理" Command="{Binding StopCommand}" IsEnabled="{Binding CanStop}"
+              MinWidth="120" Padding="16,10" Background="#3A3F47" Foreground="White" />
+      <Button Grid.Column="2" Content="导出诊断" Command="{Binding ExportDiagnosticsCommand}"
+              IsEnabled="{Binding CanExportDiagnostics}" MinWidth="110" Padding="16,10"
+              Background="#3A3F47" Foreground="White" />
+      <TextBlock Grid.Column="3" Text="{Binding StatusText}" Foreground="#E8EAED"
+                 VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+      <TextBlock Grid.Column="4" Text="{Binding RouteSummary}" Foreground="#8AB4F8"
+                 VerticalAlignment="Center" FontSize="12" />
+    </Grid>
+
+    <!-- 统计 -->
+    <Border Grid.Row="3" Background="#1C1F24" CornerRadius="8" Padding="16,12" Margin="0,0,0,12">
+      <Grid ColumnDefinitions="*,*,*,*,*,*">
+        <StackPanel Grid.Column="0">
+          <TextBlock Text="会话数" Foreground="#9AA0A6" FontSize="12" />
+          <TextBlock Text="{Binding ActiveSessions}" FontSize="24" Foreground="#E8EAED" />
+        </StackPanel>
+        <StackPanel Grid.Column="1">
+          <TextBlock Text="包总数" Foreground="#9AA0A6" FontSize="12" />
+          <TextBlock Text="{Binding PacketsTotal}" FontSize="24" Foreground="#E8EAED" />
+        </StackPanel>
+        <StackPanel Grid.Column="2">
+          <TextBlock Text="已翻译" Foreground="#9AA0A6" FontSize="12" />
+          <TextBlock Text="{Binding TranslatedCount}" FontSize="24" Foreground="#81C995" />
+        </StackPanel>
+        <StackPanel Grid.Column="3">
+          <TextBlock Text="透传" Foreground="#9AA0A6" FontSize="12" />
+          <TextBlock Text="{Binding PassedThroughCount}" FontSize="24" Foreground="#FDD663" />
+        </StackPanel>
+        <StackPanel Grid.Column="4">
+          <TextBlock Text="丢弃" Foreground="#9AA0A6" FontSize="12" />
+          <TextBlock Text="{Binding DroppedCount}" FontSize="24" Foreground="#F28B82" />
+        </StackPanel>
+        <StackPanel Grid.Column="5">
+          <TextBlock Text="批次解析失败" Foreground="#9AA0A6" FontSize="12" />
+          <TextBlock Text="{Binding DecodeErrors}" FontSize="24" Foreground="#F28B82" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- 日志 -->
+    <Border Grid.Row="4" Background="#101215" CornerRadius="8" Padding="8">
+      <Grid RowDefinitions="Auto,*">
+        <TextBlock Grid.Row="0" Text="运行日志" Foreground="#9AA0A6" FontSize="12" Margin="4,2,0,6" />
+        <ListBox Grid.Row="1" x:Name="LogList" ItemsSource="{Binding Logs}"
+                 Background="Transparent" BorderThickness="0">
+          <ListBox.ItemTemplate>
+            <DataTemplate>
+              <TextBlock Text="{Binding Text}" Foreground="{Binding Brush}"
+                         FontFamily="Consolas" FontSize="12" TextWrapping="NoWrap" />
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>

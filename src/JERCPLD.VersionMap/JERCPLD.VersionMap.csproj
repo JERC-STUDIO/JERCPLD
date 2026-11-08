@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>JERCPLD.VersionMap</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\JERCPLD.Core\JERCPLD.Core.csproj" />
+    <ProjectReference Include="..\JERCPLD.Protocol\JERCPLD.Protocol.csproj" />
+    <ProjectReference Include="..\JERCPLD.Codec\JERCPLD.Codec.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Content\fallbacks\*.json" />
+    <EmbeddedResource Include="Content\metadata\*.json" />
+  </ItemGroup>
+</Project>
