@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 if not defined LEVILAMINA_SRC set "LEVILAMINA_SRC=D:\ylcs\_tools\ll-src\LeviLamina-26.51.5\src"
 if not defined LEVILAMINA_LIB_DIR set "LEVILAMINA_LIB_DIR=D:\ylcs\_tools"
 
@@ -18,7 +18,7 @@ set "VCVARS="
 if exist "D:\VS\BuildTools\VC\Auxiliary\Build\vcvars64.bat" set "VCVARS=D:\VS\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 if not defined VCVARS (
   for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
-  if defined VSPATH if exist "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" set "VCVARS=%VSPATH%\VC\Auxiliary\Build\vcvars64.bat"
+  if defined VSPATH if exist "!VSPATH!\VC\Auxiliary\Build\vcvars64.bat" set "VCVARS=!VSPATH!\VC\Auxiliary\Build\vcvars64.bat"
 )
 if not defined VCVARS (
   echo [JERCPLD] vcvars64.bat not found
