@@ -2,7 +2,7 @@
     "entry": "JERCPLD.dll",
     "name": "JERCPLD",
     "type": "native",
-    "version": "0.1.0",
+    "version": "0.0.2",
     "author": "JERCPLD",
     "description": "In-process cross-version translation (26.60 client -> 26.50/26.51 server), skeleton stage"
 }

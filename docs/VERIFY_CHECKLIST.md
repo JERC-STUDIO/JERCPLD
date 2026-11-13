@@ -36,7 +36,7 @@ enable-lan-visibility=true
 BDS 控制台/`logs/latest.log` 必须出现：
 
 ```
-[JERCPLD] loaded v0.1.0 | server 1.26.51/2193 | clients protocol 1001-2225 | translation=OFF
+[JERCPLD] loaded v0.1.0 | server 1.26.51/2193 | clients protocol 2193-2225 | translation=OFF
 JERCPLD 已加载
 ```
 

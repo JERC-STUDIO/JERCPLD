@@ -1,30 +1,123 @@
 {
-  "schemaVersion": 2,
-  "project": "JERCPLD",
-  "form": "LeviLamina native C++ mod (in-process BDS plugin)",
-  "goal": "26.30-26.62 clients can join BDS 1.26.50/1.26.51 and fully enter the world",
-  "currentItem": "S5",
-  "status": "in_progress",
-  "lastUpdated": "2026-11-09T02:15:00+08:00",
-  "blockedReason": null,
-  "items": [
-    { "id": "S1", "title": "最小自检客户端（握手→StartGame→PASS）", "status": "completed", "acceptance": "RakNet 路径实测通过：1.9s 收到 StartGame，1295 个方块属性", "note": "仅本机自检；生产走 NetherNet" },
-    { "id": "S2", "title": "可交付形态：mod 被真实 BDS 加载 + 一键安装 + 启动横幅", "status": "completed", "acceptance": "真实 BDS 1.26.51 加载成功，横幅与 [JERCPLD] loaded 行可见" },
-    { "id": "S3", "title": "bedrock-protocol C++ codec 固定版本并构建", "status": "pending", "acceptance": "固定版本+SHA256，链接成功，static_assert 覆盖包 ID" },
-    { "id": "S4", "title": "Login/RequestNetworkSettings 协议号改写（原始包层）", "status": "completed", "acceptance": "2026-11-08 23:5x 实测：26.60 客户端经 NetherNet 完成登录并收到 StartGame（约 4s），无踢出", "note": "关键修复：在 NetworkConnection::receivePacket 反序列化前改写 2225->2193；处理层改写会让 Login 的 mConnectionRequest 为空" },
-    { "id": "S5", "title": "翻译正确性：StartGame/登录序列 + 区块地形 + 移动", "status": "in_progress", "acceptance": "26.62 客户端已进入世界（2026-11-09 确认）；移动/交互待真实客户端验收", "note": "2026-11-09 02:0x：真实 26.62 客户端确认已进入世界。02:04:30-02:05:37 会话 session-3/4 显示：c2s player_auth_input ×1125、subchunk_request ×120，s2c subchunk ×120、level_chunk ×600，移动与地形链路工作；客户端在首次 animate(44) 后被服务端 malformed 踢出（reason 56，violation packetId 44）。已实现 c2s animate 尾部 hand(u8) 裁剪，模拟客户端发送 3 次 animate 回归：kicked=false、violation=false、hook.log 记录 newLen=14。待真实客户端复测攻击/挖掘/开门。" },
-    { "id": "S6", "title": "诊断：会话包序列导出（mod 内置抓包）", "status": "completed", "acceptance": "配置开关、按会话分文件、大小上限与轮转、包 ID 白名单、十六进制内容；运行中热读取配置生效", "note": "2026-11-09 00:4x 实测：session-<n>-<c2s|s2c>.log、8MB 轮转 .1/.2、whitelist 空=全量、hex 完整、热读取无需重启。注意：单个 >1MB 出站包在抓包文件中可能只是分片，离线解码会失败（如 crafting_data），需结合客户端 violation 判断" },
-    { "id": "S7", "title": "热路径压测", "status": "pending", "acceptance": "docs/PERF.md 数字可复现" }
-  ],
-  "cancelled": [
-    { "id": "C1", "title": "NetherNet 自实现（发现/信令/SDP/ICE/DTLS/SCTP/P-384/分片）", "status": "cancelled", "reason": "形态改为 LeviLamina 进程内插件，传输由 BDS 负责，插件不接触 NetherNet；时间转入 S5" }
-  ],
-  "notes": {
-    "server": "BDS 1.26.51, LeviLamina 26.51.5, transport=nethernet, online-mode=false",
-    "serverProperties": "online-mode=false, server-port=19132, transport=nethernet, compression-algorithm=zlib, block-network-ids-are-hashes=true；备份 server.properties.bak-jercpld-20261108-212343",
-    "modSource": "mod/JERCPLD.Mod/src/JerCpldMod.cpp",
-    "modsDir": "plugins/JERCPLD（已安装，DLL 与 config 均为最新）",
-    "legacyCSharp": "src/ 与 dist/win-x64/JERCPLD.exe 保留但不分发，含 ArkMirage GPL-3.0",
-    "verificationBoundary": "S1 结论仅覆盖 RakNet；NetherNet 路径必须真实客户端复核"
-  }
+    "schemaVersion":  2,
+    "project":  "JERCPLD",
+    "form":  "LeviLamina native C++ mod (in-process BDS plugin)",
+    "goal":  "26.40-26.62 clients (protocol 2168-2225) via NetherNet chain to BDS 1.26.51; 26.30 (1001) only via RakNet",
+    "currentItem":  "S5",
+    "status":  "in_progress",
+    "lastUpdated":  "2026-11-13T15:12:00+08:00",
+    "netherNetChain2168":  {
+                               "pairAdded":  "PTL/2168-2169.json (packets=0)",
+                               "schemaDiff":  "minecraft-data 1.26.40 vs 1.26.45: 244->244 packets, 0 type diffs, 0 id diffs",
+                               "routes":  [
+                                              "c2s 2168->2193 hops=2 [2168->2169, 2169->2193]",
+                                              "s2c 2193->2168 hops=2 [2193->2169, 2169->2168]",
+                                              "2169 direct: c2s/s2c hops=1"
+                                          ],
+                               "simulated":  "1.26.40 NetherNet PASS (StartGame 3165ms, 6 chunks); 1.26.45 PASS (StartGame 2977ms, 6 chunks)",
+                               "production":  "PID 18876 (17:44:53), TCP/UDP 7551, players=0, DLL 784384B, PTL 3 pairs (2169-2193=15), acceptMinProtocol=2168, perfStatsEnabled=true",
+                               "auth144JumpFix":  "真机跳跃帧 input_data 位域宽度为 10-11B（bit 59-64 置位+填充），旧转换器只试 1..8 导致全部 fallback；fallback 复制上一帧 input_data 造成蹲键闪动。已改为宽度 1..16、bitsLo/bitsHi 128 位、只送 0..65、宽松模式丢弃未知 option 并重建、fallback 清空 input_data。107B/108B 抓包离线转换后用 1.26.51 解包成功。模拟 2169 客户端登录后 c2s 发送失效，无法回放，需真机验收。",
+                               "chestCacheFix":  "原版箱子 (-1335,64,7909) 打不开的根因：c2s 129 client_cache_status=true，BDS 只发 level_chunk 缓存哈希（sub_chunk_count=0, blobs=1, payload=1B），目标区块无 174 数据；c2s 135 首次把该 blob 报 miss 但 136 返回空，后续报 hit 继续用本地缓存。客户端射线命中方块（36 action=28/29 带 block_pos/face）但方块类型非容器，故不发 open_inventory(6)。调色板无偏移：block-network-ids-are-hashes=true，block_properties=98 仅新增 concrete/wool，chest hash=741882976。修复：2169-2193 packet 129 builtin client_cache_force_off，模拟 2169 验证 level_chunk 变为 cache=false/blobs=0/payload 1064B，需真机重新登录验证。",
+                               "blockMismatchFix":  "real 2169 StartGame carried block_pallette_checksum=d26cacf7238f1ce2; added start_game_zero_checksum builtin + packet 11 newerToOlder; isolated 1.26.45/1.26.40 PASS with captured checksum all-zero (len unchanged 73893)",
+                               "authInput144Fix":  "real 2169 player_auth_input input_data is a variable minimal-width LE bitfield (3B 0x600101 and 4B 0x60300201 samples) plus 5 option<bool> tail; player_auth_input_to_2193 tries widths 1..8 and validates modes/tick/delta/options/tail, with 2193 array-form passthrough; 99B->96B and 100B->98B both parse as 1.26.51; isolated sim array remains 92->92 PASS"
+                           },
+    "blockedReason":  "2026-11-13 15:12：-63 已解决；-122 定位到 c2s 144 player_auth_input。2169 的 input_data 是变长最小字节 bitfield：3B 0x600101（bits 0,8,21,22）和 4B 0x60300201（bits 0,9,20,21,29,30）两个真机样本已确认；2193 按 array 解析会得到非法枚举，服务端 reason=56。已改为 1..8 字节候选宽度逐档验证并转换，99B->96B、100B->98B 均被 1.26.51 解包；array-form 原样放行。现网 PID 28664、TCP/UDP 7551、Signed in、/v1/join 200 players=0、PTL 3 pairs（2169-2193=14）。hook.log 未发现无 onDisconnect 的崩溃会话，14:46/15:06 均 reason=56，服务端不能证明客户端进程崩溃；S2C 未见 OOM 级大包。RakNet 仍最低优先，26.30 只能走 RakNet。详见 docs/HANDOFF.md。",
+    "items":  [
+                  {
+                      "id":  "S1",
+                      "title":  "最小自检客户端（握手→StartGame→PASS）",
+                      "status":  "completed",
+                      "acceptance":  "NetherNet 路径实测通过：RakNet 仅本机自检验证协议改写链路"
+                  },
+                  {
+                      "id":  "S2",
+                      "title":  "可交付形态：mod 被真实 BDS 加载 + 一键安装 + 启动横幅",
+                      "status":  "completed",
+                      "acceptance":  "真实 BDS 1.26.51 加载成功，横幅与 [JERCPLD] loaded 行可见"
+                  },
+                  {
+                      "id":  "S3",
+                      "title":  "bedrock-protocol C++ codec 固定版本并构建",
+                      "status":  "cancelled",
+                      "acceptance":  "固定版本+SHA256，链接成功，static_assert 覆盖包 ID",
+                      "reason":  "2026-11-12 03:2x 判定取消：实际交付走 S8 单文件 PTL 模块（规则 JSON + C ABI）与既有 raw/结构化改写，未引入 EndstoneMC codec 依赖；继续引入 codec 只增加构建与依赖风险，不服务于唯一目标"
+                  },
+                  {
+                      "id":  "S4",
+                      "title":  "Login/RequestNetworkSettings 协议号改写（原始包层）",
+                      "status":  "completed",
+                      "acceptance":  "2026-11-08 23:5x 实测：26.60 客户端经 NetherNet 完成登录并收到 StartGame（约 4s），无踢出",
+                      "note":  "关键修复：在 NetworkConnection::receivePacket 反序列化前改写 peer→2193（raw 层；官方范围 2193-2225）"
+                  },
+                  {
+                      "id":  "S5",
+                      "title":  "翻译正确性：StartGame/登录序列 + 区块地形 + 移动",
+                      "status":  "in_progress",
+                      "acceptance":  "官方范围：2225(1.26.60/26.62) NetherNet 实测 PASS；2193(1.26.50/26.51) 直连。26.45 及更老不支持（RakNet 传输互斥）",
+                      "note":  "2026-11-09 20:25:52 **真实 2225 客户端（1.26.60）成功通过 NetherNet 连接**：PTL 翻译链路完整工作（packet=63/11/13/58 全部命中规则，StartGame 4564915->4564916 差 1 字节 editor_level_migration_version，AddActor 776->777 差 1 字节 passenger_of_block，LevelChunk skeleton 模式 46->47），后续 SetTime/SetActorData/BiomeDefinitionList/LevelEvent/SetBlocks/AddPlayer 正常发出。玩家主动断开 reason=66。翻译层在真实链路上已验证可用！2026-11-09 21:10: gamerules 重编码修复（B9）：rewriteStartGameForOldClients 新增 reencodeGamerulesInt32VarintToLi32，将 2193 服务端的 zigzag32 varint 重编码为 1001 客户端期待的 4 字节 li32 固定值，替换之前硬编码 gamerulesChanged=false 的跳过逻辑。编译 0 error，DLL 639488 字节（+123KB，新增 zigzag32 编解码 + gamerules 前向解析）。已部署到 plugins/JERCPLD，BDS 重启两次均加载成功（hook.log 21:10:51/21:12:57 均见 PTL 加载日志）。当前阻塞：B8 真实客户端多版本验收（地形/移动/物品栏）需人工 1.26.30/1.26.40/1.26.60/1.26.62 连接验证；B9 gamerules 重编码需真实 1.26.30 客户端连接确认效果。2026-11-09 22:5x 决策收敛：官方支持范围改为客户端 26.50-26.62 / 服务端 26.50-26.51，协议 2193<->2225；acceptMinProtocol 默认 2193；2169-2193 规则移至 examples/PTL（非官方维护，默认不安装）；26.30/26.40/26.45 不再作为验收目标。2026-11-10 03:0x 复查（未改代码）：对现网上一进程（3312）跑 run-regression.ps1 模拟 26.62→26.51，结果 PASS：START_GAME 4.4s、241 个区块、move 3 次、animate 7 次、kick=null、error=null，证明现网这版 DLL（688128B + PTL 11264B）翻译链路仍可用。随后 /v1/join players=1 再次复现 B10 幽灵会话，已按既有流程重启清理（新进程 17100，03:03:28 加载模块规则，players=0）。当前唯一未完成项仍是 B8：真实 1.26.60/1.26.62 客户端人工验收地形/移动/物品栏。2026-11-10 14:3x 只读复查：现网 PID 16020（12:05:21 启动）TCP 19132 / UDP 7551 正常，/v1/join players=0，latest.log 12:05:43 已 Signed in（B11 未复现），hook.log 12:05:47 规则来源=模块 JERCPLD.PTL.dll、translation=ON，DLL 688128B SHA256 C30D5BC6…E04703；环境干净可直接真人验收，无需重启。另记 B12：用户复述目标含 26.30–26.62，与已收敛的 26.50–26.62 冲突，已写入 BLOCKERS 待决策。2026-11-10 18:0x 自动化巡检：现网 PID 16020（12:05:21 启动，已运行 23h+）TCP 19132 正常监听；run-regression.ps1 PASS（2225→2193，StartGame 4.6s、121 区块、3 move、5 animate、kick=null、error=null），hook.log 18:03:47 完整记录 PTL 模块加载 + s2c 翻译命中；回归后 /v1/join 立即变 players=1（B10 幽灵会话复现）。18:0x 清理时发现必须用 bedrock_server_mod.exe（带 LeviLamina 注入补丁），原版 bedrock_server.exe 无 mod 加载能力；Start-Process -WindowStyle Hidden 不稳定（进程走到 Server started 后消失），前台 run_in_background 稳定。重启后 PID 17644（18:15:37）TCP 19132 正常，37 模组全启用（JERCPLD translation=ON，hooks installed），二次回归 PASS（101 区块，kick=null），B10 幽灵会话再次复现。**2026-11-10 21:0x 自动化巡检**：清理 PID 17644 → run_in_background 启动（Start-Process -WindowStyle Hidden 再次不稳定，进程 8276 在模块加载后消失，无 AppError 日志）→ 前台 bedrock_server_mod.exe 稳定启动 PID 7428（21:06:55）。run-regression.ps1 PASS（2225→2193：StartGame 4.9s、141 区块、3 move、6 animate、kick=null、error=null）。回归后 players=1（B10），杀进程重启后最终 PID 20420（21:09:14）：TCP 19132 LISTENING、UDP 7551、443 出站 ×2（150.171.110.137/136 ESTABLISHED，信令 OK）、/v1/join players=0、hook.log 21:09:39 加载 JERCPLD.PTL.dll 模块、translation=ON。现网完全干净，可接受真实客户端验收。 2026-11-11 06:4x 「翻译全套内容/穷举法」落地：diff-schemas.js 改为全量穷举（254 个 packet_*、递归嵌套类型与枚举、mcpe_packet 反查真实 ID），结果 17 个包有差异 + 8 个新增包，已覆盖进入世界链路（11/12/13/44/58），未覆盖 30/93/144/180/300/315/348；新增 c2s 包 354/357/358/360 需丢弃策略。未改代码、未重编译、未重启现网，仅更新 docs/PACKET_DIFF_2193_2225.md 第十节。"
+                  },
+                  {
+                      "id":  "S6",
+                      "title":  "诊断：会话包序列导出（mod 内置抓包）",
+                      "status":  "completed",
+                      "acceptance":  "配置开关、按会话分文件、大小上限与轮转、包 ID 白名单、十六进制内容；运行中热读取配置生效",
+                      "note":  "2026-11-09 00:4x 实测：session-\u003cn\u003e-\u003cc2s|s2c\u003e.log、8MB 轮转 .1/.2、whitelist 空=全量、hex 完整、热读取无需重启。注意：单个 \u003e1MB 出站包在抓包文件中可能只是分片，离线解码会失败（如 crafting_data），需结合客户端 violation 判断"
+                  },
+                  {
+                      "id":  "S7",
+                      "title":  "热路径压测",
+                      "status":  "pending",
+                      "acceptance":  "docs/PERF.md 数字可复现"
+                  },
+                  {
+                      "id":  "S8",
+                      "title":  "单文件翻译模块 JERCPLD.PTL.dll（C ABI）",
+                      "status":  "completed",
+                      "acceptance":  "已部署现网。模拟 26.62 端到端 PASS：RequestNetworkSettings、Login、StartGame（4564916->4564917）、121-123 区块、移动、7 次 animate 未踢、kick=null、无 malformed/violation。现网进程 3312，TCP 19132 / UDP 7551。",
+                      "note":  "导出 5 个 C 符号（api_version/pair_count/pair_name/pair_rules/self_check），主插件解析后立即 FreeLibrary；API 版本/导出/自检/JSON 任一失败拒绝模块且不影响服务端；DLL 不存在时退回 PTL/*.json。产物 build/JERCPLD.PTL.dll 11264B，主插件 688128B。现网 hook.log 已见“规则来源=模块 JERCPLD.PTL.dll”。"
+                  },
+                  {
+                      "id":  "S9",
+                      "title":  "可复现回归脚本（一条命令跑模拟客户端全流程）",
+                      "status":  "completed",
+                      "acceptance":  "tools/verify-client/run-regression.ps1：给定目标端口/UDP 发现端口后一条命令输出 PASS/FAIL；players>0 时 SKIP 并提示重启",
+                      "note":  "verify.js 增加 --animate；nethernet 客户端发现端口可用 NETHERNET_DISCOVERY_PORT 覆盖（仅测试环境）。注意 B10：模拟客户端非优雅断开会留下 players=1 幽灵会话，重复跑前需重启目标实例。"
+                  },
+                  {
+                      "id":  "S10",
+                      "title":  "独立 RakNet 实例覆盖 26.30-26.45（B12 决策落地）",
+                      "status":  "completed",
+                      "acceptance":  "d:\\ylcs_spike（transport=raknet, 19252/19253, JERCPLD acceptMinProtocol=1001, serverIP=\"\"）下，模拟客户端 1.26.45/1.26.40/1.26.30 经 RakNet 全流程 PASS（StartGame+区块+move+animate 无踢出）；现网 nethernet 实例全程不受影响",
+                      "note":  "2026-11-11 00:1x-00:5x 预置完成：spike 已配 transport=raknet + acceptMinProtocol=1001；PTL 模块停用（改名 .bak-raknet，模块存在时 JSON 规则不加载），已安装 examples/PTL/2169-2193.json 并新增 2168-2193.json。关键发现：收敛版 DLL 对 2169 已不再内联裁剪 camera_presets（出站裁剪仅剩 clientProtocol<2168 旧分支，首跑 PartialReadError 393 vs 339），JSON 兜底规则可补齐该缺口。执行被中断两次：(1) B13 信令抢占（spike 曾以生产 serverIP 注册，dev 会话已置空 serverIP）；(2) 带窗口启动（Minimized）在 Commit ID 后空转挂死（~17s CPU，两次复现），无窗口 WMI 启动可完整 boot。执行规则：启动用 WMI（ powershell Start-Process 前台链）；启动前确认 serverIP=\"\"；与现网-149 排查冲突时让路。2026-11-12 01:0x-01:2x 完成：修复 mod 三处 bug——(1) reencodeGamerules 方向纠正（改名 reencodeGamerulesInt32Li32ToVarint：2193 GameRuleI32=li32 → 1001 GameRuleVarint=varint LEB128）；(2) StartGame tail 解析修正（Experiments countType=li32 固定 4 字节，非 varint；experimental_gameplay_override 为普通 bool 非 optional）；(3) skipNbtPayload 按 prismarine-nbt littleVarint 语义重写（list/byteArray/intArray/longArray 计数=zigzag32 varint，TAG_Int/Long 值=zigzag varint 变长）。DLL 690176B（01:22:26）部署 spike。实测：1.26.45 PASS（257 区块/SPAWN/2 move/3 animate/kick=null/error=null）；1.26.40 PASS（257 区块/SPAWN/2 move/4 animate/error=null）；1.26.30 PASS code=0（StartGame 98 blockProperties 解析成功+4 区块+move+animate+无踢出；spawn=false 系客户端对 set_entity_data metadata NBT 等非关键 s2c 包的 schema 告警，属 2193→1001 下一层差异，不阻塞 S10 验收）。现网 PID 24632（TCP/UDP 7551）全程未触碰保持监听。另：minecraft-data 1.26.45/1.26.40 protocol.json 已打补丁对齐 player_auth_input（官方文档确认 2168/2169/2193 wire 一致，社区 schema 建模错误，备份 .bak-jercpld-20261112）。"
+                  }
+              ],
+    "cancelled":  [
+                      {
+                          "id":  "C1",
+                          "title":  "NetherNet 自实现（发现/信令/SDP/ICE/DTLS/SCTP/P-384/分片）",
+                          "status":  "cancelled",
+                          "reason":  "形态改为 LeviLamina 进程内插件，传输由 BDS 负责，插件不接触 NetherNet；时间转入 S5"
+                      }
+                  ],
+    "notes":  {
+                  "server":  "BDS 1.26.51, LeviLamina 26.51.5, transport=nethernet, online-mode=false",
+                  "serverProperties":  "online-mode=false, server-port=7551, server-portv6=19133, transport=nethernet, compression-algorithm=zlib, block-network-ids-are-hashes=true, enable-lan-visibility=true；备份 server.properties.bak-jercpld-20261111-1920-before7551 与 server.properties.bak-jercpld-20261111-0040。",
+                  "modSource":  "mod/JERCPLD.Mod/src/JerCpldMod.cpp",
+                  "modsDir":  "plugins/JERCPLD（现网 JERCPLD.dll 735744B + PTL 模块 14848B，3 pairs；v0.0.1 A/B 已还原；替换前备份 d:\\ylcs\\_backups\\JERCPLD_20261111_0018_pre-v0.0.1）",
+                  "legacyCSharp":  "src/ 与 dist/win-x64/JERCPLD.exe 保留但不分发，含 ArkMirage GPL-3.0",
+                  "verificationBoundary":  "RakNet 自检结论不等于 NetherNet；NetherNet 路径用模拟客户端（发现端口可配）+ 真实客户端复核",
+                  "productionBuild":  "现网当前（2026-11-13 15:12）：JERCPLD.dll 735744B + PTL 模块 14848B（3 pairs：2168-2169=0、2169-2193=14、2193-2225=7）；BDS PID 28664（15:11:23 启动），TCP/UDP 7551；15:11:31 Signed in，translation=ON 规则来源=模块；acceptMinProtocol=2168；StartGame checksum 清零 + player_auth_input 144 变长 bitfield→array；Pack Stack - None；公网 http://<server-ip>:7551/v1/join 200 players=0。",
+                  "abBaselineV001":  "A/B 传输层对比：替换前构建（688128B+PTL，PID 20192，00:15:27）与 v0.0.1（499712B，PID 25204，00:20:35）均使用同一 server.properties（nethernet/19132/block-network-ids-are-hashes=true）和同一 LeviLamina netherNetPatch（serverIP=<server-ip>，2 个 STUN），端口、映射地址、Signed in、/v1/join players=0 完全一致；差异只有 mod DLL 与 443 连接数（3 vs 2，属连接时序）。结论：传输/信令层与 mod 构建无关，InitialConnection-149 不能归因于当前构建。v0.0.1 无 PTL/模块启动行、无 hook.log。",
+                  "signaling":  "2026-11-11 00:11 进程（PID 27984）00:12:06 已 Signed in；00:12:44 隔离实例 d:\\ylcs_spike（PID 10076，serverIP 也是 <server-ip>，映射 19252）注册信令并持有 4 条 443，随后现网 443 归零、客户端扫不到。已停止隔离实例并把其 serverIP 置空（Config.json.bak-jercpld-20261111-0015），00:15 重启现网恢复 Signed in + 443×3。详见 BLOCKERS B13。",
+                  "stun":  "netherNetPatch: enable=true, singlePort=true, serverIP=<server-ip>（=公网出口），stunServers=[stun.l.google.com:19302, stun.miwifi.com:3478]（LL 默认值；配置项 targeted.netherNetPatch.stunServers，仅接受 stun:/stuns: URI）。实测 miwifi/sipnet/blackberry 可达、Google 超时；同一本地端口 63900 对三个目标均返回 <server-ip>:63900 → NAT 端点无关、端口保留。结论：外部 STUN 只能发现映射，不能修正宣告端口或防火墙，不是一劳永逸方案。",
+                  "publicReachability":  "最终统一 7551（2026-11-11 19:23）：server-port=7551，WS BDSPort=7551，防火墙保留 TCP/UDP 7551；19132 relay 任务已 Disabled、进程结束、脚本保留但不再自启。实测 BDS PID 4944，TCP 7551 + UDP 7551，UDP 19132 无监听；SDP m=application 7551，候选 <server-ip> 7551 srflx raddr 172.16.0.18 rport 7551 + host 7551；公网 /v1/join 200 players=0；模拟客户端 PASS。18:03 真实 2225 客户端已到 StartGame/区块，relay 日志同期无 session_open → 未走 relay，推测直连 7551。",
+                  "raknetStage2":  "2026-11-12 本轮阶段2 PASS：隔离探针 d:\\ylcs_spike\\raknet_probe\\probe.js 监听 UDP 19132，bedrock-protocol 模拟 1.26.45（raknet/minecraft 模式）完成握手并收到 RequestNetworkSettings，原始 fe06c10100000879，varint 包ID 193，协议 2169；现网 PID 2344 未受影响，探针退出后 UDP 19132 释放，无信令注册。测试依赖补丁 rak.js 使用 minecraft 模式（备份 .bak-jercpld-20261112-1935）。未验证：插件内注入 BDS、真实 26.45 客户端。设计见 docs/RAKNET_TRANSPORT_DESIGN.md。",
+                  "raknetP1P2":  "2026-11-12 夜间：P1 PASS——$onNewIncomingConnection=0x7ff78e76bb00、NetworkConnection::$ctor=0x298e5734de0（隔离实例 hook.log [SYMPROBE]）；getConnectionFromId 经 SymbolView 为 0（但 LeviLamina.def 导出，非阻塞）。P2a PASS——隔离实例 [CONNPROBE] onNewIncoming=true conn=0x276b19d16c0，BDS 创建并登记 NetworkConnection；探针在本地提供 NetworkPeer 基类虚函数/NetworkID 默认构造 shim 才能链接，未装现网。P2b 未完成：enable 主线程直接注册成功，延迟到后台线程后连接未被网络 tick 服务，注入 RequestNetworkSettings(fe06c10100000879) 未到 handler；下一步用 ServerThreadExecutor/服务器 tick 主线程调度或 hook 真实连接创建。",
+                  "raknetP3P4":  "P3：版本表已确认 1.26.30=1001、1.26.40=2168、1.26.45=2169、1.26.51=2193、1.26.60=2225；1.26.43/44 未确认（数据源无条目，位于2168-2169之间）；1.26.50 推测2193、1.26.61/62 推测2225（未确认）。P4：protocol.json diff——1.26.40→1.26.45 244→244 包，0 变更（可做显式空档，但需完整下一档后再启用）；1.26.45→1.26.51 244→246，新增 packet_set_player_furnace_options / packet_record_started，变更 packet_boss_event / packet_play_sound / packet_move_entity_delta / packet_dimension_data / packet_serverbound_pack_setting_change；现有 2169-2193 规则只覆盖 camera preset，不能当完整档，避免半程硬翻。",
+                  "morningChecklist":  "明早：1) 现网 PID 2344、TCP/UDP 7551、Signed in、translation=ON、规则来源=模块、公网 /v1/join 200 players=0；2) 真实 26.62 连 <server-ip>:7551（Pack Stack None，无资源包下载），验收进世界/地形/移动/物品栏；3) 真实 26.45 跑 d:\\ylcs_spike\\raknet_probe\\probe.js 确认 UDP19132 握手与协议2169；4) P2b 主线程调度或真实连接 hook；5) P4 完成 2169-2193 规则与新增包策略，加完整性检查后再启用 2168-2169 空档；6) 不要把探针构建装现网，不要重启用 19132 relay。详见 docs/HANDOFF.md。",
+                  "resourcePacks":  "2026-11-12 19:46 临时移除：world_resource_packs.json 19→[]、world_behavior_packs.json 14→[]（备份 *.bak-20261112-1948）；resource_packs 目录 82 顶层/5806 文件保留（整体移走导致 Failed to load Vanilla Resource Pack，已回滚）。重启后日志 Pack Stack - None。还原：停止 BDS 后把两个 .bak 复制回原名并重启。证据级判断：B15 抓包显示六个资源包包结构 2193/2225 逐字节相同，卡点是 137MB 下载慢（reason=122），非翻译层。",
+                  "ptlModule":  "build/JERCPLD.PTL.dll 11264B，API v1，5 个 C 导出；隔离实例 d:\\ylcs_spike（nethernet，19252）与现网均用模拟 26.62 端到端 PASS：121-257 区块、移动、animate 发送未踢、kick=null。",
+                  "backups":  "d:\\ylcs\\_backups\\JERCPLD_20261111_0018_pre-v0.0.1（替换前完整插件目录，含 688128B DLL + PTL + config + hook 日志）；plugins/JERCPLD/JERCPLD.dll.bak-20261109-2335-preptl-known-good（pre-PTL 502784，已知可用）；JERCPLD.dll.old-180922（同 hash）；JERCPLD.dll.bak-20261109-2258（PTL 639488）；JERCPLD.dll.bak-20261109-2320-ptl-645120（收敛 PTL 645120）。",
+                  "pendingDecision":  "现网统一 7551（客户端 <server-ip>:7551）；relay 任务 Disabled。资源包临时清空已生效（Pack Stack None），真人复测后按 B20 还原两个世界包 JSON；不要整体移动 resource_packs（vanilla 必需）。PackCDN 19132 保留以便还原后使用。真实 26.62 复测待做；若仍卡，先查客户端缓存/CDN/vanilla，再查信令与 7551。"
+              }
 }

@@ -1,0 +1,154 @@
+{
+  "ptlApi": 1,
+  "pair": [2169, 2193],
+  "serverVersions": ["1.26.45", "1.26.50", "1.26.51"],
+  "packets": {
+    "11": {
+      "name": "start_game",
+      "overrides": {
+        "olderToNewer": [],
+        "newerToOlder": [
+          { "type": "builtin", "name": "start_game_zero_checksum" }
+        ]
+      }
+    },
+    "129": {
+      "name": "client_cache_status",
+      "note": "2169 客户端缓存键与 2193 调色板不一致，强制 false 让服务端下发完整区块。",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "builtin", "name": "client_cache_force_off" }
+        ],
+        "newerToOlder": []
+      }
+    },
+    "30": {
+      "name": "inventory_transaction",
+      "note": "2169 内层 TransactionUseItem/item descriptor 结构未确定；先显式 drop 并抓原始包，避免 malformed 数据踢人。",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "drop" }
+        ],
+        "newerToOlder": [
+          { "type": "builtin", "name": "transaction_to_2169" }
+        ]
+      }
+    },
+    "144": {
+      "name": "player_auth_input",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "builtin", "name": "player_auth_input_to_2193" }
+        ],
+        "newerToOlder": []
+      }
+    },
+    "148": {
+      "name": "item_stack_response",
+      "overrides": {
+        "olderToNewer": [],
+        "newerToOlder": [
+          { "type": "builtin", "name": "item_stack_response_to_2169" }
+        ]
+      }
+    },
+    "174": {
+      "name": "subchunk",
+      "overrides": {
+        "olderToNewer": [],
+        "newerToOlder": [
+          { "type": "builtin", "name": "subchunk_to_2169" }
+        ]
+      }
+    },
+    "315": {
+      "name": "serverbound_diagnostics",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "drop" }
+        ],
+        "newerToOlder": []
+      }
+    },
+    "74": {
+      "name": "boss_event",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "builtin", "name": "boss_event_to_2193" }
+        ],
+        "newerToOlder": [
+          { "type": "builtin", "name": "boss_event_to_2169" }
+        ]
+      }
+    },
+    "86": {
+      "name": "play_sound",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "builtin", "name": "play_sound_to_2193" }
+        ],
+        "newerToOlder": [
+          { "type": "builtin", "name": "play_sound_to_2169" }
+        ]
+      }
+    },
+    "111": {
+      "name": "move_entity_delta",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "appendBytes", "bytes": "00" }
+        ],
+        "newerToOlder": [
+          { "type": "builtin", "name": "move_entity_delta_strip_ticks" }
+        ]
+      }
+    },
+    "198": {
+      "name": "camera_presets",
+      "overrides": {
+        "olderToNewer": [],
+        "newerToOlder": [
+          { "type": "builtin", "name": "camera_presets_strip" }
+        ]
+      }
+    },
+    "180": {
+      "name": "dimension_data",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "builtin", "name": "dimension_data_to_2193" }
+        ],
+        "newerToOlder": [
+          { "type": "builtin", "name": "dimension_data_to_2169" }
+        ]
+      }
+    },
+    "329": {
+      "name": "serverbound_pack_setting_change",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "builtin", "name": "pack_setting_change_guard" }
+        ],
+        "newerToOlder": []
+      }
+    },
+    "351": {
+      "name": "set_player_furnace_options",
+      "overrides": {
+        "olderToNewer": [],
+        "newerToOlder": [
+          { "type": "drop" }
+        ]
+      }
+    },
+    "352": {
+      "name": "record_started",
+      "overrides": {
+        "olderToNewer": [],
+        "newerToOlder": [
+          { "type": "drop" }
+        ]
+      }
+    }
+  }
+}

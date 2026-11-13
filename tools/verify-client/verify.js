@@ -28,7 +28,9 @@ function parseArgs (argv) {
     jsonOut: null,
     dwellMs: 0,
     packetLog: null,
-    move: false
+    move: false,
+    animate: false,
+    cacheOn: false
   }
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
@@ -46,9 +48,12 @@ function parseArgs (argv) {
       case '--network-id': out.networkId = BigInt(next()); break
       case '--dump-login': out.dumpLogin = true; break
       case '--spoof-game-version': out.spoofGameVersion = next(); break
+      case '--spoof-protocol-version': out.spoofProtocolVersion = Number(next()); break
       case '--dwell-ms': out.dwellMs = Number(next()); break
       case '--packet-log': out.packetLog = next(); break
       case '--move': out.move = true; break
+      case '--animate': out.animate = true; break
+      case '--cache-on': out.cacheOn = true; break
       case '--help':
         console.log('node verify.js --host <ip> --port <port> --version <mc-version> [--transport raknet|nethernet] [--offline false] [--timeout ms]')
         process.exit(0)
@@ -141,7 +146,31 @@ function scheduleDwell () {
   dwellScheduled = true
   log('DWELL', `keeping connection for ${args.dwellMs} ms`)
   if (args.move) startMovement()
+  if (args.animate) startAnimate()
   setTimeout(() => finish(0, `dwell ${args.dwellMs} ms complete`), args.dwellMs)
+}
+
+let animateTimer = null
+
+function startAnimate () {
+  sendAnimate()
+  animateTimer = setInterval(sendAnimate, 1500)
+}
+
+function sendAnimate () {
+  try {
+    const id = client.startGameData?.runtime_entity_id ?? 1n
+    client.queue('animate', {
+      action_id: 'swing_arm',
+      runtime_entity_id: id,
+      data: 0,
+      has_swing_source: false,
+      hand: 'main_hand'
+    })
+    log('ANIMATE', 'sent swing_arm hand=main_hand')
+  } catch (e) {
+    log('ANIMATE_ERROR', String(e.message || e))
+  }
 }
 
 let dwellScheduled = false
@@ -219,6 +248,18 @@ if (args.spoofGameVersion) {
   console.log('SPOOF GameVersion=' + args.spoofGameVersion + ' (protocol stays ' + client.options.protocolVersion + ')')
 }
 
+if (args.spoofProtocolVersion) {
+  const origWrite = client.write.bind(client)
+  client.write = (name, params, ...rest) => {
+    if (name === 'login' && params) {
+      const old = params.protocol_version
+      params.protocol_version = args.spoofProtocolVersion
+      console.log('SPOOF login protocol_version: ' + old + ' -> ' + args.spoofProtocolVersion)
+    }
+    return origWrite(name, params, ...rest)
+  }
+}
+
 if (args.dumpLogin) {
   const origWrite = client.write.bind(client)
   client.write = (name, params, ...rest) => {
@@ -247,6 +288,9 @@ if (args.packetLog) {
       let approx = 0
       try { approx = params ? JSON.stringify(params).length : 0 } catch {}
       fs.appendFileSync(args.packetLog, `${new Date().toISOString()} ${name} approx_json=${approx}\n`)
+      if (name === 'packet_violation_warning') {
+        fs.appendFileSync(args.packetLog, `${new Date().toISOString()} VIOLATION_DETAIL ${JSON.stringify(params)}\n`)
+      }
     } catch {}
   })
 }
@@ -273,6 +317,18 @@ client.on('start_game', (packet) => {
   stages.levelName = packet.level_name ?? null
   stages.blockProperties = Array.isArray(packet.block_properties) ? packet.block_properties.length : null
   log('START_GAME', `level=${stages.levelName} blockProperties=${stages.blockProperties} runtimeEntityId=${packet.runtime_entity_id}`)
+  if (args.cacheOn) {
+    // 真机 1.26.45 会在登录后上报 client_cache_status=true；模拟器默认发 false，
+    // 这里补一次 true 用来验证 JERCPLD 的强制关闭规则。
+    setTimeout(() => {
+      try {
+        client.write('client_cache_status', { enabled: true })
+        log('CACHE', 'sent client_cache_status enabled=true')
+      } catch (e) {
+        log('CACHE_ERROR', String(e.message || e))
+      }
+    }, 1200)
+  }
   if (args.requireChunks === 0 && args.dwellMs <= 0) finish(0, 'start_game received (minimal self-check)')
 })
 

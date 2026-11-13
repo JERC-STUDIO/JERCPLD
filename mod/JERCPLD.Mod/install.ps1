@@ -20,6 +20,12 @@ Copy-Item $dll (Join-Path $target 'JERCPLD.dll') -Force
 Copy-Item (Join-Path $modRoot 'manifest.json') (Join-Path $target 'manifest.json') -Force
 Copy-Item (Join-Path $modRoot 'tooth.json') (Join-Path $target 'tooth.json') -Force -ErrorAction SilentlyContinue
 
+$ptlDll = Join-Path $modRoot 'build\JERCPLD.PTL.dll'
+if (-not (Test-Path $ptlDll)) { throw "missing $ptlDll, build first" }
+$ptlDst = Join-Path $target 'PTL'
+New-Item -ItemType Directory -Force $ptlDst | Out-Null
+Copy-Item $ptlDll (Join-Path $ptlDst 'JERCPLD.PTL.dll') -Force
+
 $configDir = Join-Path $target 'config'
 New-Item -ItemType Directory -Force $configDir | Out-Null
 $configPath = Join-Path $configDir 'config.json'
@@ -29,7 +35,7 @@ if (-not (Test-Path $configPath)) {
   "translationEnabled": true,
   "serverVersion": "1.26.51",
   "serverProtocol": 2193,
-  "acceptMinProtocol": 1001,
+  "acceptMinProtocol": 2193,
   "acceptMaxProtocol": 2225
 }
 '@

@@ -4,24 +4,59 @@
 >
 > **Disclaimer**: Not an official LeviMC product. Not approved by LeviMC and not associated with LeviMC. LeviLamina and related names are trademarks of their respective owners.
 
-LeviLamina 原生 C++ mod，在 BDS 进程内做跨版本翻译。目标：26.30–26.62 客户端进入 26.50/26.51 服务端。
+LeviLamina 原生 C++ mod，在 BDS 进程内做跨版本翻译。支持范围：**客户端 26.40–26.62（协议 2168–2225）进入服务端 26.50/26.51（协议 2193）**。
 
-## 当前状态（2026-11-09）
+> 26.30 及更老客户端只支持 RakNet 传输，而 26.51 服务端只接受 NetherNet，传输层互斥，因此不在支持范围。
+> 2168/2169 走 `2168→2169→2193` 链式路由；26.50–26.62 走 `2193↔2225`。证据与边界见 [docs/BLOCKERS.md](docs/BLOCKERS.md) 与 [docs/PACKET_FIELDS_2169_2193_2225.md](docs/PACKET_FIELDS_2169_2193_2225.md)。
+
+## 当前状态（2026-11-13）
 
 | 项 | 状态 |
 | --- | --- |
+| 官方支持范围 | **客户端 26.40–26.62（协议 2168–2225）/ 服务端 26.50–26.51（协议 2193）**；26.30 及更老不支持（RakNet-only） |
 | mod 被真实 BDS 1.26.51 加载 | 已完成（横幅可见） |
 | 26.60 / 26.62 客户端进入世界 | **已完成**（2026-11-09 02:0x 真实 26.62 客户端确认） |
+| 26.45（2169）进入世界 | **已完成**（NetherNet 直连 2169→2193；跳跃/蹲伏输入已修正） |
+| 26.40（2168）链式路由 | 已完成 `2168→2169→2193` 两跳，模拟端 PASS |
 | 地形 / 子区块 | 已完成基础链路：LevelChunk 改写为 skeleton，客户端 SubChunkRequest，BDS 返回真实地形 |
 | 移动 / 基础交互 | 进行中：player_auth_input 正常；animate(44) 的 hand 字段已裁剪，待真实客户端复测攻击/挖掘/开门 |
 | 方块调色板校验 | 已定位 -63 block_mismatch；StartGame `block_pallette_checksum` 清 0 跳过校验（勿回退） |
 | 内置抓包 | 已完成（默认关闭，可运行中热开启） |
 | 自动自检 | `tools/verify-client/verify.js`（NetherNet / RakNet） |
+| 版本链结构 | 已完成单文件 PTL 模块：`plugins/JERCPLD/PTL/JERCPLD.PTL.dll`（C ABI + 内嵌规则 + 失败隔离） |
+| 反向（2225 服务端 + 2193 客户端） | **仅代码 + 离线往返验证**；本机缺可用的 LeviLamina 26.60，未跑真实服务端 |
+
+## 0.0.2 更新（2026-11-13）
+
+- **2169/2168 客户端**：NetherNet 直连 2169→2193，2168 走两跳；StartGame checksum 清零、`camera_presets(198)` 裁剪、`move_entity_delta(111)` 等规则上线。
+- **`player_auth_input(144)`**：`input_data` 按真机结构解析为「长度前缀列表」（不是位域）；`block_action` 真正翻译为 2193 扁平数组；deprecated 2/54/55 过滤；无法解析的帧只清空 input_data，不重复旧状态。
+- **`client_cache_status(129)`**：c2s 强制 `false`，避免服务端只发缓存哈希导致客户端显示陈旧方块。
+- **容器/物品链路**：`inventory_transaction(30)` 仍显式 drop（内层 item descriptor 结构待样本定稿）；`item_stack_response(148)`、`subchunk(174)` 已翻译。
+- **可观测性**：每连接一行 `[CONN]`（协议/跳数/144 处理方式/累计耗时），30 秒 `[PERF]` 汇总（默认关闭）。
+- **文档**：`PACKET_FIELDS_2169_2193_2225.md`、`REPO_SPLIT_PLAN.md`、`PTL.md`、`HANDOFF.md`、`RAKNET_TRANSPORT_DESIGN.md`。
+
+## PTL 规则文件
+
+翻译规则以**单个 DLL** 交付：`plugins/JERCPLD/PTL/JERCPLD.PTL.dll`，一个文件承载全部支持的版本对。
+规则源仍是 `PTL/*.json`，构建期内嵌进 DLL；主插件通过 5 个 C ABI 导出读取规则，解析后立即卸载模块。
+加载失败（API 版本/导出/自检/JSON）只拒绝该模块，不影响服务端；DLL 不存在时退回 JSON（兼容模式）。
+格式、ABI、失败隔离与单模块取舍见 [docs/PTL.md](docs/PTL.md)。
+
+## 新增一个客户端版本的步骤
+
+1. 在 `PTL/` 新建 `<旧协议>-<新协议>.json`（格式见 `docs/PTL.md`）。
+2. 对称差异用 `rules` + `addedIn`；不对称差异用 `overrides` 分方向写。
+3. 需要整包重编码时用 `builtin`，并在 `docs/PTL.md` 的内置能力表登记。
+4. 重新运行 `build.bat`：会把全部 `PTL/*.json` 内嵌进 `JERCPLD.PTL.dll`。
+5. 把版本号纳入 `acceptMinProtocol` / `acceptMaxProtocol`。
+6. 用 `tools/verify-client/run-regression.ps1` 跑模拟客户端回归，并抓包逐字段核对。
+
+详细差异清单与反向实现状态见 `docs/PACKET_DIFF_2193_2225.md`。
 
 ## 产物与安装
 
-- 构建产物：`mod/JERCPLD.Mod/build/JERCPLD.dll`
-- 安装目录：`d:\ylcs\plugins\JERCPLD\`（DLL + manifest.json + tooth.json + config/config.json）
+- 构建产物：`mod/JERCPLD.Mod/build/JERCPLD.dll` 与 `build/JERCPLD.PTL.dll`
+- 安装目录：`d:\ylcs\plugins\JERCPLD\`（DLL + PTL/JERCPLD.PTL.dll + manifest.json + tooth.json + config/config.json）
 - 一键安装：`mod/JERCPLD.Mod/install.ps1 -ServerDir d:\ylcs`（加 `-SkipBuild` 可只复制现有 DLL）
 
 配置项（`plugins/JERCPLD/config/config.json`，抓包段支持热读取）：
@@ -31,7 +66,7 @@ LeviLamina 原生 C++ mod，在 BDS 进程内做跨版本翻译。目标：26.30
   "translationEnabled": true,
   "serverVersion": "1.26.51",
   "serverProtocol": 2193,
-  "acceptMinProtocol": 1001,
+  "acceptMinProtocol": 2168,
   "acceptMaxProtocol": 2225,
   "capture": {
     "enabled": false,
@@ -73,7 +108,7 @@ plugins/JERCPLD/
   "translationEnabled": false,
   "serverVersion": "1.26.51",
   "serverProtocol": 2193,
-  "acceptMinProtocol": 1001,
+  "acceptMinProtocol": 2168,
   "acceptMaxProtocol": 2225
 }
 ```
@@ -96,7 +131,7 @@ BDS 日志出现：
 ```
 [GMLIB] 正在加载 JERCPLD v0.1.0
 [JERCPLD] config loaded: ./plugins/JERCPLD\config\config.json
-[JERCPLD] loaded v0.1.0 | server 1.26.51/2193 | clients protocol 1001-2225 | translation=OFF
+[JERCPLD] loaded v0.1.0 | server 1.26.51/2193 | clients protocol 2193-2225 | translation=OFF
 JERCPLD 已加载
 ```
 
@@ -113,8 +148,8 @@ JERCPLD 已加载
   Mod name        : JERCPLD
   Mod version     : 0.1.0
   Server target   : BDS 1.26.51 (protocol 2193)
-  Client range    : protocol 1001 - 2225 (1.26.30 - 1.26.62)
-  Translation     : OFF (skeleton)
+  Client range    : protocol 2168 - 2225 (1.26.40 - 1.26.62)
+  Translation     : OFF
   Config file     : config/config.json
 ==========================================================================
 ```
@@ -156,6 +191,12 @@ JERCPLD 已加载
 - 阻塞：`docs/BLOCKERS.md`
 - 用户验证清单：`docs/VERIFY_CHECKLIST.md`
 - 抓包使用说明：`docs/CAPTURE.md`
+- 2193↔2225 包差异清单：`docs/PACKET_DIFF_2193_2225.md`
+- 2169/2193/2225 三版字段表：`docs/PACKET_FIELDS_2169_2193_2225.md`
+- PTL 规则与能力矩阵：`docs/PTL.md`
+- 双仓拆分计划：`docs/REPO_SPLIT_PLAN.md`
+- 跨版本传输设计：`docs/RAKNET_TRANSPORT_DESIGN.md`
+- 交接记录：`docs/HANDOFF.md`
 
 ## 许可
 

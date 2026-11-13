@@ -1,0 +1,68 @@
+{
+  "ptlApi": 1,
+  "pair": [2193, 2225],
+  "serverVersions": ["1.26.50", "1.26.51"],
+  "packets": {
+    "11": {
+      "name": "start_game",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "builtin", "name": "start_game_editor_checksum" }
+        ],
+        "newerToOlder": [
+          { "type": "builtin", "name": "start_game_editor_checksum" }
+        ]
+      }
+    },
+    "12": {
+      "name": "add_player",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "builtin", "name": "add_player_passenger" }
+        ],
+        "newerToOlder": []
+      }
+    },
+    "13": {
+      "name": "add_actor",
+      "rules": [
+        { "type": "appendBytes", "addedIn": 2225, "bytes": "00" }
+      ]
+    },
+    "44": {
+      "name": "animate",
+      "rules": [
+        { "type": "appendBytes", "addedIn": 2225, "bytes": "00" }
+      ]
+    },
+    "58": {
+      "name": "level_chunk",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "builtin", "name": "level_chunk_skeleton" }
+        ],
+        "newerToOlder": [
+          { "type": "builtin", "name": "level_chunk_skeleton" }
+        ]
+      }
+    },
+    "63": {
+      "name": "player_list",
+      "overrides": {
+        "olderToNewer": [
+          { "type": "builtin", "name": "player_list_fab" }
+        ],
+        "newerToOlder": []
+      }
+    },
+    "129": {
+      "name": "client_cache_status",
+      "overrides": {
+        "olderToNewer": [],
+        "newerToOlder": [
+          { "type": "builtin", "name": "client_cache_force_off" }
+        ]
+      }
+    }
+  }
+}
