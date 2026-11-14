@@ -47,12 +47,6 @@ if errorlevel 1 exit /b 1
 copy /Y "%~dp0manifest.json" "%~dp0build\manifest.json" >nul
 copy /Y "%~dp0tooth.json" "%~dp0build\tooth.json" >nul
 
-REM ---- PTL module: single JERCPLD.PTL.dll with embedded PTL/*.json ----
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gen-ptl-header.ps1"
-if errorlevel 1 exit /b 1
-cl /nologo /std:c++20 /EHa /MD /LD /utf-8 /O2 /DNDEBUG /DNOMINMAX ^
-  /I"%~dp0ptl" ^
-  "%~dp0ptl\JERCPLD.PTL.cpp" ^
-  /Fe:"%~dp0build\JERCPLD.PTL.dll"
-if errorlevel 1 exit /b 1
+REM ---- PTL 规则模块已迁到独立仓库 JERCPTL（github.com/JERC-STUDIO/JERCPTL）----
+REM 本仓只构建引擎；安装时用 install.ps1 -PtlDll <JERCPTL 的 build\JERCPLD.PTL.dll> 带上模块。
 echo BUILD OK

@@ -9,6 +9,7 @@
 #include "ll/api/memory/Symbol.h"
 #include "mc/deps/core/utility/optional_ref.h"
 #include "mc/network/NetEventCallback.h"
+#include "mc/network/CompressedNetworkPeer.h"
 #include "mc/network/EncryptedNetworkPeer.h"
 #include "mc/network/NetworkConnection.h"
 #include "mc/network/NetworkPeer.h"
@@ -94,8 +95,8 @@ struct Config {
     bool               translationEnabled = true;
     std::string        serverVersion      = "1.26.51";
     int                serverProtocol     = 2193;
-    int                acceptMinProtocol  = 2193; // 1.26.50（官方支持范围下限；更低版本非官方维护）
-    int                acceptMaxProtocol  = 2225; // 1.26.60
+    int                acceptMinProtocol  = 2168; // 1.26.40（PTL 已覆盖 2168-2169 段，默认值与之对齐）
+    int                acceptMaxProtocol  = 2225; // 1.26.62
     CaptureConfig      capture;
     RaknetSpikeConfig  raknetSpike;
     bool               symProbeEnabled = false;
@@ -130,6 +131,10 @@ std::string      gCaptureDir;
 int              gCaptureMaxFileBytes = 8 * 1024 * 1024;
 int              gCaptureMaxFiles     = 4;
 std::vector<int> gCaptureWhitelist;
+// c2s_raw.log 原始转储默认关闭（跟随 capture.enabled），并设总量上限，避免长期运行写满磁盘。
+std::atomic_bool      gRawDumpEnabled{false};
+std::atomic<uint64_t> gRawDumpBytes{0};
+constexpr uint64_t    kRawDumpMaxBytes = 16ull * 1024 * 1024;
 std::mutex       gCaptureMutex;
 std::unordered_map<void const*, uint32_t> gCaptureSessions;
 uint32_t         gCaptureNextSession = 1;
@@ -137,8 +142,11 @@ std::shared_mutex gTranslatedPeersMutex;
 // peer -> 客户端原始协议号（2225 / 2169 / 1001 ...）+ 该连接的性能统计槽位。
 // 翻译必须按连接隔离，不能用“是否被翻译过”的布尔量代替版本，否则 2169 会被套用 2225 的改写。
 struct TransPeerInfo {
-    int protocol = 0;
-    int connSlot = -1;
+    int         protocol   = 0;
+    int         connSlot   = -1;
+    // 抓包归并键：同一条连接的上/下行写进同一个 session 文件。
+    // 出站钩子拿到的是 peer 指针，需要用 NetworkConnection 指针做键。
+    void const* captureKey = nullptr;
 };
 std::unordered_map<void const*, TransPeerInfo> gTranslatedPeers;
 
@@ -174,6 +182,9 @@ uint64_t steadyNowMs() {
 }
 
 std::string ptlRouteSummary(int from, int to);
+// 出站 s2c 翻译的实际落点：nethernet 下没有 BatchedNetworkPeer，
+// 必须在 CompressedNetworkPeer::sendPacket（压缩前的裸包）上挂钩。
+void registerCompressedPeerHook(void* compressedPeer);
 
 std::string authInputModeSummary(int clientProtocol) {
     if (clientProtocol == 2168 || clientProtocol == 2169) {
@@ -210,6 +221,10 @@ void*            gEncryptedSendTarget{};
 void*            gCompressedSendTarget{};
 void*            gBatchedSendTarget{};
 void*            gOnDisconnectTarget{};
+// CompressedNetworkPeer::sendPacket 在 LeviLamina 符号表里没有条目（comp_send=0），
+// 改为运行时从实例 vtable 取地址后挂钩；这是 nethernet 出站唯一的明文落点。
+void*            gCompressedVtableTarget{};
+void*            gOriginalCompressedVtableSend{};
 bool             gHooksInstalled = false;
 
 template <class... Args>
@@ -239,10 +254,30 @@ std::string nowStamp() {
     return buf;
 }
 
+// 协议号到客户端版本的可读映射，仅用于日志/横幅，避免文档与代码里的版本区间漂移。
+std::string protocolToVersionLabel(int protocol) {
+    switch (protocol) {
+    case 1001:
+        return "1.26.30";
+    case 2168:
+        return "1.26.40-1.26.44";
+    case 2169:
+        return "1.26.45";
+    case 2193:
+        return "1.26.50-1.26.51";
+    case 2225:
+        return "1.26.60-1.26.62";
+    default:
+        return fmt::format("unknown({})", protocol);
+    }
+}
+
 // 热路径不写文件；仅用于握手阶段诊断。
 template <class... Args>
 void hookLog(fmt::format_string<Args...> fmt, Args&&... args) {
-    std::ofstream out("plugins/JERCPLD/hook.log", std::ios::app);
+    static std::mutex mutex;
+    std::lock_guard   lock(mutex);
+    std::ofstream     out("plugins/JERCPLD/hook.log", std::ios::app);
     out << nowStamp() << " " << fmt::format(fmt, std::forward<Args>(args)...) << '\n';
 }
 
@@ -363,6 +398,7 @@ void maybeReloadCapture() {
         auto const& capture = json["capture"];
         std::lock_guard lock(gCaptureMutex);
         gCaptureEnabled.store(capture.value("enabled", false), std::memory_order_relaxed);
+        gRawDumpEnabled.store(gCaptureEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
         gCaptureDir          = capture.value("outputDir", std::string("diagnostics"));
         gCaptureMaxFileBytes = capture.value("maxFileBytes", 8 * 1024 * 1024);
         gCaptureMaxFiles     = capture.value("maxFiles", 4);
@@ -506,8 +542,11 @@ int allocConnSlotLocked(int clientProtocol) {
 
 void registerTranslatedPeer(NetworkConnection* connection, int clientProtocol) {
     if (!connection || !needsProtocolRewrite(clientProtocol)) return;
-    auto batched = connection->mBatchedPeer.lock();
-    if (!batched) return;
+    // 不能以 BatchedNetworkPeer 是否存在为前提：nethernet 传输下没有 batched peer，
+    // 旧逻辑在这里直接 return，导致 s2c 翻译与抓包从未生效。
+    auto batched    = connection->mBatchedPeer.lock();
+    auto compressed = connection->mCompressedPeer.lock();
+    auto encrypted  = connection->mEncryptedPeer.lock();
     bool     created   = false;
     int      slotIndex = -1;
     uint32_t connId    = 0;
@@ -522,18 +561,25 @@ void registerTranslatedPeer(NetworkConnection* connection, int clientProtocol) {
         } else {
             slotIndex = it->second.connSlot;
         }
-        gTranslatedPeers[connection]    = TransPeerInfo{clientProtocol, slotIndex};
-        gTranslatedPeers[batched.get()] = TransPeerInfo{clientProtocol, slotIndex};
+        TransPeerInfo info{clientProtocol, slotIndex, connection};
+        gTranslatedPeers[connection] = info;
+        if (batched) gTranslatedPeers[batched.get()] = info;
+        if (compressed) gTranslatedPeers[compressed.get()] = info;
+        if (encrypted) gTranslatedPeers[encrypted.get()] = info;
     }
+    if (compressed) registerCompressedPeerHook(compressed.get());
     if (created) {
         int         server = gServerProtocol.load(std::memory_order_relaxed);
         std::string line   = fmt::format(
-            "[JERCPLD][CONN] id={} proto={}->{} {} jump={} perf=起始",
+            "[JERCPLD][CONN] id={} proto={}->{} {} jump={} perf=起始 peernet: comp={} enc={} batch={}",
             connId,
             clientProtocol,
             server,
             ptlRouteSummary(clientProtocol, server),
-            authInputModeSummary(clientProtocol)
+            authInputModeSummary(clientProtocol),
+            static_cast<void*>(compressed.get()),
+            static_cast<void*>(encrypted.get()),
+            static_cast<void*>(batched.get())
         );
         modLog("{}", line);
         hookLog("{}", line);
@@ -549,6 +595,14 @@ int peerProtocolVersion(void const* peer, int* connSlot = nullptr) {
     }
     if (connSlot) *connSlot = it->second.connSlot;
     return it->second.protocol;
+}
+
+// 出站钩子拿到的是 peer 指针，抓包要按连接归并，所以取登记时的 NetworkConnection 指针。
+void const* peerCaptureKey(void const* peer) {
+    std::shared_lock lock(gTranslatedPeersMutex);
+    auto             it = gTranslatedPeers.find(peer);
+    if (it == gTranslatedPeers.end() || !it->second.captureKey) return peer;
+    return it->second.captureKey;
 }
 
 int connectionProtocolWithSlot(NetworkConnection* connection, int* connSlot) {
@@ -569,6 +623,19 @@ int connectionProtocol(NetworkConnection* connection) {
 
 std::atomic_uint gRawC2sSession{0};
 
+bool rawDumpBudget(size_t bytes) {
+    if (!gRawDumpEnabled.load(std::memory_order_relaxed)) return false;
+    uint64_t prev = gRawDumpBytes.fetch_add(bytes, std::memory_order_relaxed);
+    if (prev + bytes > kRawDumpMaxBytes) {
+        static std::atomic_bool logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed)) {
+            hookLog("[JERCPLD] c2s_raw 达到 {}B 上限，停止继续转储", kRawDumpMaxBytes);
+        }
+        return false;
+    }
+    return true;
+}
+
 // 翻译前原始 c2s 采样：只记录容器/物品链路，单独文件、单包限长 4096B。
 void dumpRawC2sPacket(std::string const& data, int version, bool isLogin) {
     if (isLogin) gRawC2sSession.fetch_add(1, std::memory_order_relaxed);
@@ -579,6 +646,7 @@ void dumpRawC2sPacket(std::string const& data, int version, bool isLogin) {
                     || packetId == 51 || packetId == 52 || packetId == 144 || packetId == 145
                     || packetId == 147 || packetId == 148;
     if (!wanted) return;
+    if (!rawDumpBudget(4096)) return;
     static std::mutex                            mutex;
     static std::unordered_map<uint32_t, uint32_t> authCounts;
     static std::unordered_map<uint64_t, uint32_t> otherCounts;
@@ -728,9 +796,7 @@ NetworkPeer::DataStatus receivePacketDetour(
                 hookLog("[JERCPLD] translated peer registered: protocol={}", rawVersion);
             }
             if (gPtlDrop) {
-                if (wasLogin && gActiveSessions.load(std::memory_order_relaxed) > 0) {
-                    gActiveSessions.fetch_sub(1, std::memory_order_relaxed);
-                }
+                // 会话计数只由 onDisconnect 回收，这里不能再减，否则会双降导致 reload 门禁失效。
                 hookLog("[JERCPLD][PTL][c2s] packet dropped");
                 return NetworkPeer::DataStatus::NoData;
             }
@@ -2175,10 +2241,10 @@ void addAnimateHandFor2225Server(std::string& data) {
     hookLog("[JERCPLD] reverse c2s animate hand appended: newLen={}", data.size());
 }
 
-// 注意：26.45（2169）及更老版本不在官方支持范围内，相关历史代码/规则仅作示例保留。
-// 26.45 客户端只支持 RakNet 传输，而本服务端运行 NetherNet；且 nethernet 下
-// getRakPeer() 返回 null、RakPeer 构造符号未导出，传输层无法建立连接。
-// 详见 docs/BLOCKERS.md B4。
+// 26.45（2169）与 26.4x（2168）已由 PTL 的 2168-2169 / 2169-2193 规则覆盖，
+// 客户端走 NetherNet 直连即可进服（见 README「已完成」）。
+// 仍受限的是「仅 RakNet」的旧客户端：nethernet 下 getRakPeer() 返回 null、
+// RakPeer 构造符号未导出，那条传输路径不可用，详见 docs/BLOCKERS.md B4。
 
 // ============================================================================
 // PTL 规则引擎（Packet Translation Language）
@@ -2199,13 +2265,31 @@ struct PtlRule {
 };
 
 struct PtlPacketRules {
-    std::string              name;
-    std::vector<PtlRule>     rules;     // 对称事实：older->newer 加，newer->older 撤
-    std::vector<PtlRule>     olderToNewer;
-    std::vector<PtlRule>     newerToOlder;
-    // 运行时自检状态：只会从 false 变成 true，重复写入结果一致。
-    mutable bool             validated = false;
-    mutable bool             disabled  = false;
+    std::string          name;
+    std::vector<PtlRule> rules;     // 对称事实：older->newer 加，newer->older 撤
+    std::vector<PtlRule> olderToNewer;
+    std::vector<PtlRule> newerToOlder;
+    // 运行时自检状态：s2c / c2s 会在不同线程并发命中同一个 pair，用原子量避免数据竞争。
+    mutable std::atomic_bool validated{false};
+    mutable std::atomic_bool disabled{false};
+
+    PtlPacketRules() = default;
+    PtlPacketRules(PtlPacketRules const& other) { *this = other; }
+    PtlPacketRules& operator=(PtlPacketRules const& other) {
+        if (this == &other) return *this;
+        name         = other.name;
+        rules        = other.rules;
+        olderToNewer = other.olderToNewer;
+        newerToOlder = other.newerToOlder;
+        validated.store(other.validated.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        disabled.store(other.disabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        return *this;
+    }
+    PtlPacketRules(PtlPacketRules&& other) { *this = other; }
+    PtlPacketRules& operator=(PtlPacketRules&& other) {
+        if (this != &other) *this = static_cast<PtlPacketRules const&>(other);
+        return *this;
+    }
 };
 
 struct PtlPair {
@@ -2575,19 +2659,26 @@ bool ptlSkipVarint(std::string const& data, size_t& pos) {
     return false;
 }
 
-// boss_event：2169 在 target_entity_id 之后还有 player_id(zigzag64)，2193 已删除。
-bool bossEventTo2169(std::string& data, size_t payloadOffset) {
+// boss_event：2193 在 event_type 之后多了 player_id，且只有 add(0) / remove(1) 事件才带。
+// 旧实现无条件在 boss_entity_id 之后插入/删除，位置错了一个字段，会破坏后续字段解析。
+bool bossEventTo2193(std::string& data, size_t payloadOffset) {
     size_t pos = payloadOffset;
-    if (!ptlSkipVarint(data, pos)) return false;
-    data.insert(pos, 1, '\0'); // player_id = 0
+    if (!ptlSkipVarint(data, pos)) return false; // boss_entity_id
+    size_t   typeOff = pos;
+    if (!ptlSkipVarint(data, pos)) return false; // event_type
+    if (readVarUInt(data, typeOff) > 1) return true;
+    data.insert(pos, 1, '\0'); // 仅 add/remove 需要 player_id
     return true;
 }
 
-bool bossEventTo2193(std::string& data, size_t payloadOffset) {
+bool bossEventTo2169(std::string& data, size_t payloadOffset) {
     size_t pos = payloadOffset;
-    if (!ptlSkipVarint(data, pos)) return false;
+    if (!ptlSkipVarint(data, pos)) return false; // boss_entity_id
+    size_t   typeOff = pos;
+    if (!ptlSkipVarint(data, pos)) return false; // event_type
+    if (readVarUInt(data, typeOff) > 1) return true;
     size_t start = pos;
-    if (!ptlSkipVarint(data, pos)) return false;
+    if (!ptlSkipVarint(data, pos)) return false; // player_id
     data.erase(start, pos - start);
     return true;
 }
@@ -2932,9 +3023,9 @@ bool looksLike2169AuthInput(std::string const& data) {
     return true;
 }
 
-// 2169 的 input_data 是“最小字节数”的小端 bitfield。真机跳跃帧实测宽度可达 10-11 字节
-//（高位 61/62 的 jump/sneak raw 位被置位后又带回 1-2 字节客户端填充），
-// 因此候选宽度必须覆盖到 16；只把 0..65（InputNum）的有效位送进 2193。
+#if 0
+// 已被 tryPlayerAuthInputList（长度前缀确定性解析）取代，无调用者，勿重新启用。
+// 下面注释里的「小端 bitfield」是错误方向：真机数据是长度前缀列表，不是位域。
 bool tryPlayerAuthInputWidth(
     std::string const& data,
     size_t             payloadOffset,
@@ -3038,6 +3129,7 @@ bool tryPlayerAuthInputWidth(
     out.append(data, pos, 28);
     return true;
 }
+#endif
 
 // 临时兜底：unparseable 144 用上一帧合法 2193 内容 + 当前帧 position/rotation。
 // 只解决位置冻结，block_action 仍会丢失；覆盖率表保持 RULE-LOSSY。
@@ -3237,14 +3329,14 @@ bool playerAuthInputTo2193(std::string& data, size_t payloadOffset) {
     // 稳定性约束：同一会话的 tick 必须递增；不满足的候选整帧拒绝，避免宽度/位集抖动。
     uint32_t sessionNow = gRawC2sSession.load(std::memory_order_relaxed);
     bool     hasLast    = !gLastAuthInput2193.empty() && gLastAuthInputSession == sessionNow;
-    if (hasLast && candidateCount > 0 && usedTick <= gLastAuthInputTick) {
-        // tick 不递增：该帧不可信，走 fallback。
+    if (hasLast && candidateCount > 0 && usedTick < gLastAuthInputTick) {
+        // tick 倒退：该帧不可信，直接丢弃（不再沿用上一帧载荷）。
         candidateCount = 0;
         out.clear();
     }
     if (candidateCount == 0) {
         // 不受 64 条上限限制，保证无法解析的帧一定有原始 hex。
-        {
+        if (rawDumpBudget(4096)) {
             static std::mutex mutex;
             std::lock_guard   lock(mutex);
             std::ofstream     out("plugins/JERCPLD/c2s_raw.log", std::ios::app);
@@ -3260,34 +3352,12 @@ bool playerAuthInputTo2193(std::string& data, size_t payloadOffset) {
             out << '\n';
         }
         uint32_t session = gRawC2sSession.load(std::memory_order_relaxed);
-        if (!gLastAuthInput2193.empty() && gLastAuthInputSession == session
-            && gLastAuthInput2193.size() >= payloadOffset + 32 && data.size() >= payloadOffset + 32) {
-            std::string fallback = gLastAuthInput2193;
-            // 只替换 pitch/yaw/position/move/head_yaw 这 32 字节，其余沿用上一帧合法内容。
-            std::memcpy(
-                fallback.data() + payloadOffset,
-                data.data() + payloadOffset,
-                32
-            );
-            uint64_t lastTick = gLastAuthInputTick;
-            size_t   origLen  = data.size();
-            // 不再整体沿用上一帧 input_data：那会把上一帧的 sneaking/sneak_down 等
-            // 旧状态重复送进服务端，表现为蹲下键闪动。这里清空成空数组，只保留
-            // 位置/视角/移动量的最新值。
-            bool cleared = clearAuthInputData(fallback, payloadOffset);
-            data = std::move(fallback);
-            hookLog(
-                "[JERCPLD][PTL] auth_input FALLBACK session={} lastTick={} origLen={} input_data={} (position patched; block_action lost)",
-                session,
-                lastTick,
-                origLen,
-                cleared ? "cleared" : "kept"
-            );
-            return true;
-        }
+        (void)session;
+        // 方案 A：宁可丢一帧（客户端会自动重发），也不沿用上一帧的 tick/option 载荷，
+        // 否则会出现「position 冻结」和「挖两下 / 放两个」。
         gPtlDrop = true;
         hookLog(
-            "[JERCPLD][PTL] auth_input unparseable: drop frame len={} (no fallback frame; raw hex in c2s_raw.log)",
+            "[JERCPLD][PTL] auth_input unparseable: drop frame len={} (no fallback; raw hex in c2s_raw.log)",
             data.size()
         );
         return true;
@@ -3558,6 +3628,23 @@ bool ptlApplyRules(
     return true;
 }
 
+// builtin 名字写错时必须在加载期报错，否则规则语法合法、静默失效，只在运行期表现为「规则失败」。
+bool isKnownBuiltin(std::string const& name) {
+    static constexpr char const* kBuiltins[] = {
+        "start_game_editor_checksum", "start_game_zero_checksum", "add_player_passenger",
+        "level_chunk_skeleton",       "player_list_fab",           "client_cache_force_off",
+        "camera_presets_strip",       "boss_event_to_2169",        "boss_event_to_2193",
+        "play_sound_to_2169",         "play_sound_to_2193",        "pack_setting_change_guard",
+        "transaction_to_2169",        "transaction_to_2193",       "player_auth_input_to_2193",
+        "item_stack_response_to_2169","subchunk_to_2169",          "move_entity_delta_strip_ticks",
+        "dimension_data_to_2169",     "dimension_data_to_2193",
+    };
+    for (auto candidate : kBuiltins) {
+        if (name == candidate) return true;
+    }
+    return false;
+}
+
 bool ptlParseRules(nlohmann::json const& arr, std::vector<PtlRule>& out, std::string& error) {
     if (!arr.is_array()) {
         error = "rules must be an array";
@@ -3608,6 +3695,10 @@ bool ptlParseRules(nlohmann::json const& arr, std::vector<PtlRule>& out, std::st
         }
         if (rule.type == "builtin" && rule.builtin.empty()) {
             error = "builtin requires name";
+            return false;
+        }
+        if (rule.type == "builtin" && !isKnownBuiltin(rule.builtin)) {
+            error = "unknown builtin: " + rule.builtin;
             return false;
         }
         if (rule.type != "builtin" && rule.type != "appendBytes" && rule.type != "insertField"
@@ -3914,6 +4005,26 @@ void ptlTranslate(std::string& data, int from, int to, char const* tag) {
             uint32_t packetId = readVarUInt(data, offset);
             auto     it       = pair->packets.find(static_cast<int>(packetId));
             if (it == pair->packets.end()) continue;
+            if (it->second.disabled.load(std::memory_order_acquire)) {
+                // 规则已被自检判死：该包的格式必然不匹配，继续下发只会让客户端 BadPacket。
+                static std::mutex                      logMutex;
+                static std::unordered_set<std::string> loggedDisabled;
+                std::string                            key = fmt::format("{}:{}", tag, packetId);
+                bool                                   first = false;
+                {
+                    std::lock_guard<std::mutex> guard(logMutex);
+                    first = loggedDisabled.insert(key).second;
+                }
+                if (first) {
+                    hookLog(
+                        "[JERCPLD][PTL][{}] packet={}({}) 规则已禁用，丢弃后续同包",
+                        tag, packetId, it->second.name
+                    );
+                }
+                gPtlDrop    = true;
+                gPtlRuleHit = true;
+                return;
+            }
             bool olderToNewer = (hop.from == pair->a);
             std::vector<PtlRule> effective = it->second.rules;
             if (olderToNewer) {
@@ -3940,12 +4051,15 @@ void ptlTranslate(std::string& data, int from, int to, char const* tag) {
             std::string original = data;
             gPtlRuleHit          = true;
             if (!ptlApplyRules(data, offset, effective, olderToNewer)) {
-                data = std::move(original);
+                // fail-closed：已知需要改写的包改不动时直接丢弃，不能把服务端格式原样发给新客户端，
+                // 否则客户端会以 BadPacket(90) 断开且现场极难定位。
+                data     = std::move(original);
+                gPtlDrop = true;
                 hookLog(
-                    "[JERCPLD][PTL][{}] packet={} 规则失败，保持原样（{}->{}）",
-                    tag, packetId, hop.from, hop.to
+                    "[JERCPLD][PTL][{}] packet={}({}) 规则失败，已丢弃（{}->{}）",
+                    tag, packetId, it->second.name, hop.from, hop.to
                 );
-                continue;
+                return;
             }
             {
                 static std::atomic<unsigned> logged{0};
@@ -3957,17 +4071,23 @@ void ptlTranslate(std::string& data, int from, int to, char const* tag) {
                     );
                 }
             }
-            if (!it->second.validated && !it->second.rules.empty()) {
+            if (!it->second.validated.load(std::memory_order_relaxed) && !it->second.rules.empty()) {
                 // 对称规则首次使用时做 A->B->A 自检，失败即禁用该包规则。
                 std::string check = original;
                 if (ptlApplyRules(check, offset, it->second.rules, true)
                     && ptlApplyRules(check, offset, it->second.rules, false)
                     && check == original) {
-                    it->second.validated = true;
+                    it->second.validated.store(true, std::memory_order_release);
                 } else {
-                    it->second.disabled = true;
-                    data = std::move(original);
-                    hookLog("[JERCPLD][PTL][{}] packet={} 往返校验失败，规则已禁用", tag, packetId);
+                    it->second.disabled.store(true, std::memory_order_release);
+                    data                = std::move(original);
+                    gPtlDrop            = true;
+                    hookLog(
+                        "[JERCPLD][PTL][{}] packet={} 往返校验失败，规则已禁用且本包丢弃",
+                        tag,
+                        packetId
+                    );
+                    return;
                 }
             }
         }
@@ -3995,6 +4115,62 @@ void dispatchOutboundTranslation(std::string& data, int clientProtocol, int conn
     perfRecord(0, clientProtocol, connSlot, perfId, perfIn, data.size(), gPtlRuleHit, perfNowNs() - perfT0);
 }
 
+void appendVarUInt(std::string& out, size_t value) {
+    while (value >= 0x80) {
+        out.push_back(static_cast<char>((value & 0x7F) | 0x80));
+        value >>= 7;
+    }
+    out.push_back(static_cast<char>(value));
+}
+
+// 出站缓冲区在 CompressedNetworkPeer::sendPacket 处已经是「打包后」的形式：
+// 若干 [varint len][packet body] 串联（单包时就是 [len][body]，实测 NetworkSettings
+// 为 0c 8f 01 ...）。旧实现把长度前缀当成 packet id，25 字节的 StartGame 因此
+// 永远匹配不到规则。这里先严格校验批格式，失败则按单个裸包处理。
+bool splitOutboundBatch(std::string const& data, std::vector<std::pair<size_t, size_t>>& spans) {
+    size_t pos = 0;
+    while (pos < data.size()) {
+        size_t   bodyOff = pos;
+        uint32_t len     = readVarUInt(data, pos);
+        if (len == 0 || pos + len > data.size()) return false;
+        spans.emplace_back(pos, len);
+        pos += len;
+    }
+    return pos == data.size() && !spans.empty();
+}
+
+void captureOutboundBatch(std::string const& data, void const* sessionKey) {
+    std::vector<std::pair<size_t, size_t>> spans;
+    if (splitOutboundBatch(data, spans)) {
+        for (auto const& [off, len] : spans) {
+            capturePacket("s2c", sessionKey, data.substr(off, len));
+        }
+        return;
+    }
+    capturePacket("s2c", sessionKey, data);
+}
+
+// 逐包翻译后重新写长度前缀；被规则丢弃的包不进输出。
+void dispatchOutboundBatch(std::string& data, int clientProtocol, int connSlot, void const* sessionKey) {
+    std::vector<std::pair<size_t, size_t>> spans;
+    if (!splitOutboundBatch(data, spans)) {
+        dispatchOutboundTranslation(data, clientProtocol, connSlot);
+        if (!gPtlDrop) capturePacket("s2c", sessionKey, data);
+        return;
+    }
+    std::string out;
+    out.reserve(data.size() + 16);
+    for (auto const& [off, len] : spans) {
+        std::string body = data.substr(off, len);
+        dispatchOutboundTranslation(body, clientProtocol, connSlot);
+        if (gPtlDrop) continue;
+        capturePacket("s2c", sessionKey, body);
+        appendVarUInt(out, body.size());
+        out += body;
+    }
+    data.swap(out);
+}
+
 // /jercpld reload 需要 LeviLamina 命令 API，而它依赖 boost.pfr（本机无该头）。
 // 在补齐依赖前改用「PTL 目录 mtime 变化 + 无在线会话」时自动重载，
 // 安全门禁与命令一致：有会话在线就只记录日志，不切换规则。
@@ -4008,7 +4184,9 @@ std::filesystem::file_time_type ptlDirMtime() {
     auto newest = fs::file_time_type{};
     for (auto const& entry : fs::directory_iterator(dir, ec)) {
         if (!entry.is_regular_file()) continue;
-        if (entry.path().extension() != ".json") continue;
+        auto ext = entry.path().extension();
+        // 规则可能是 JSON，也可能是独立的 PTL 模块 dll，两者都要参与 mtime 判定。
+        if (ext != ".json" && ext != ".dll") continue;
         auto t = entry.last_write_time(ec);
         if (t > newest) newest = t;
     }
@@ -4223,6 +4401,76 @@ void compressedSendDetour(
     if (origin) origin(self, data, reliability, compressible);
 }
 
+// nethernet 下出站链路是 CompressedNetworkPeer -> EncryptedNetworkPeer -> NetherNet，
+// 既没有 BatchedNetworkPeer，也没有可解析的 CompressedNetworkPeer::$sendPacket 符号。
+// 因此从连接实例的 vtable 取 sendPacket 地址后挂钩。这里拿到的是压缩前的裸包
+// （varint packetId + 字段），与 batched 层语义一致，可直接复用同一套 s2c 翻译。
+void compressedPeerSendDetour(
+    void*                    self,
+    std::string const&       data,
+    NetworkPeer::Reliability reliability,
+    Compressibility          compressible
+) {
+    auto origin = reinterpret_cast<PeerSendFn>(gOriginalCompressedVtableSend);
+    if (!origin) return;
+    int connSlot     = -1;
+    int peerProtocol = peerProtocolVersion(self, &connSlot);
+    if (peerProtocol != 0) {
+        static std::atomic_int sLogCount{0};
+        if (sLogCount.fetch_add(1, std::memory_order_relaxed) < 24) {
+            std::vector<std::pair<size_t, size_t>> spans;
+            if (splitOutboundBatch(data, spans)) {
+                std::string ids;
+                for (auto const& [off, len] : spans) {
+                    size_t   pos = off;
+                    uint32_t id  = readVarUInt(data, pos);
+                    ids += fmt::format("{}({}) ", id, len);
+                }
+                hookLog(
+                    "[JERCPLD][S2C] batch proto={} bytes={} packets=[{}]",
+                    peerProtocol,
+                    data.size(),
+                    ids
+                );
+            } else {
+                size_t   pos = 0;
+                uint32_t id  = readVarUInt(data, pos);
+                hookLog("[JERCPLD][S2C] raw proto={} id={} len={}", peerProtocol, id, data.size());
+            }
+        }
+    }
+    if (gTranslationEnabled.load(std::memory_order_relaxed) && peerProtocol != 0
+        && peerProtocol != gServerProtocol.load(std::memory_order_relaxed)) {
+        std::string translated = data;
+        dispatchOutboundBatch(translated, peerProtocol, connSlot, peerCaptureKey(self));
+        origin(self, translated, reliability, compressible);
+        return;
+    }
+    captureOutboundBatch(data, peerCaptureKey(self));
+    origin(self, data, reliability, compressible);
+}
+
+// NetworkPeer 虚表槽位：0 dtor, 1 sendPacket, 2 getNetworkStatus, 3 update,
+// 4 flush, 5 isLocal, 6 isEncrypted, 7 isLan, 8 _receivePacket。
+// 派生类 override 占用基类同一槽位，所以 vtable[1] 就是 CompressedNetworkPeer::sendPacket。
+void registerCompressedPeerHook(void* compressedPeerPtr) {
+    if (gCompressedVtableTarget || !compressedPeerPtr) return;
+    void** vtable = *reinterpret_cast<void***>(compressedPeerPtr);
+    if (!vtable) return;
+    void* target = vtable[1];
+    if (!target) return;
+    gCompressedVtableTarget = target;
+    int result              = ll::memory::hook(
+        target,
+        reinterpret_cast<ll::memory::FuncPtr>(&compressedPeerSendDetour),
+        reinterpret_cast<ll::memory::FuncPtr*>(&gOriginalCompressedVtableSend),
+        ll::memory::HookPriority::Normal,
+        true
+    );
+    hookLog("[JERCPLD] compressed vtable send hook: target={} result={}", target, result);
+    modLog("[JERCPLD] compressed vtable send hook: target={} result={}", target, result);
+}
+
 void batchedSendDetour(
     void*                    self,
     std::string const&       data,
@@ -4233,6 +4481,11 @@ void batchedSendDetour(
     if (logCount.fetch_add(1, std::memory_order_relaxed) < 4) logSendHead("batched", data);
     auto origin = reinterpret_cast<PeerSendFn>(gOriginalBatchedSendPacket);
     if (!origin) return;
+    // 已挂钩 compressed 层时由它负责 s2c 翻译与抓包，避免同一包被翻译两次。
+    if (gCompressedVtableTarget) {
+        origin(self, data, reliability, compressible);
+        return;
+    }
     std::string        translated;
     std::string const* payload = &data;
     // 已登记的非 2193 客户端才需要 s2c 改写；具体包的处理按 peer 协议号分流：
@@ -4504,6 +4757,14 @@ void uninstallProtocolHooks() {
             true
         );
     }
+    if (gCompressedVtableTarget) {
+        ll::memory::unhook(
+            gCompressedVtableTarget,
+            reinterpret_cast<ll::memory::FuncPtr>(&compressedPeerSendDetour),
+            true
+        );
+        gCompressedVtableTarget = nullptr;
+    }
     gHooksInstalled = false;
     modLog("[JERCPLD] protocol hooks removed");
 }
@@ -4601,7 +4862,7 @@ private:
                     << "  \"translationEnabled\": true,\n"
                     << "  \"serverVersion\": \"1.26.51\",\n"
                     << "  \"serverProtocol\": 2193,\n"
-                    << "  \"acceptMinProtocol\": 2193,\n"
+                    << "  \"acceptMinProtocol\": 2168,\n"
                     << "  \"acceptMaxProtocol\": 2225,\n"
                     << "  \"perfStatsEnabled\": false,\n"
                     << "  \"capture\": {\n"
@@ -4645,6 +4906,7 @@ private:
             gAcceptMaxProtocol.store(mConfig.acceptMaxProtocol, std::memory_order_relaxed);
             gPerfEnabled.store(mConfig.perfStatsEnabled, std::memory_order_relaxed);
             gCaptureEnabled.store(mConfig.capture.enabled, std::memory_order_relaxed);
+            gRawDumpEnabled.store(mConfig.capture.enabled, std::memory_order_relaxed);
             gCaptureDir          = mConfig.capture.outputDir;
             gCaptureMaxFileBytes = mConfig.capture.maxFileBytes;
             gCaptureMaxFiles     = mConfig.capture.maxFiles;
@@ -4684,9 +4946,11 @@ private:
             mConfig.serverProtocol
         );
         logger.info(
-            "  Client range    : protocol {} - {} (1.26.50 - 1.26.62)",
+            "  Client range    : protocol {} - {} ({} ~ {})",
             mConfig.acceptMinProtocol,
-            mConfig.acceptMaxProtocol
+            mConfig.acceptMaxProtocol,
+            protocolToVersionLabel(mConfig.acceptMinProtocol),
+            protocolToVersionLabel(mConfig.acceptMaxProtocol)
         );
         logger.info("  Translation     : {}", mConfig.translationEnabled ? "ON" : "OFF");
         logger.info("  Perf stats      : {}", mConfig.perfStatsEnabled ? "ON (30s -> hook.log)" : "OFF");

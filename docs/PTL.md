@@ -1,13 +1,20 @@
 # PTL 规则文件（Packet Translation Language）
 
+## 仓库边界（2026-11-14 起）
+
+- **本仓（JERCPLD）只含引擎**：协议 hook、翻译调度、模块加载/ABI 校验、config、capture。
+- **规则源与 PTL DLL 的构建在独立仓库 [JERC-STUDIO/JERCPTL](https://github.com/JERC-STUDIO/JERCPTL)**：
+  `PTL/*.json`、`JERCPLD.PTL.cpp`、`gen-ptl-header.ps1` 都已迁出本仓，本仓构建不再产出 `JERCPLD.PTL.dll`。
+- 安装：`mod/JERCPLD.Mod/install.ps1 -ServerDir <服务器目录> -PtlDll <JERCPTL>\build\JERCPLD.PTL.dll`。
+
 ## 模块形态（2026-11-09 起）
 
 翻译规则以**单个 DLL** 交付：`plugins/JERCPLD/PTL/JERCPLD.PTL.dll`。
 
-- 一个文件承载全部支持的版本对（当前只有 2193↔2225）。
+- 一个文件承载全部支持的版本对（2168↔2169、2169↔2193、2193↔2225）。
 - 主插件启动时扫描该文件并加载；支持哪些版本由主插件配置的 `acceptMinProtocol` / `acceptMaxProtocol` 决定，不由 DLL 数量决定。
 - 服主替换这个 DLL 即可更新翻译能力；新增版本对需要重新构建该 DLL（单模块的取舍：分发/升级简单，但新增版本必须重新出包）。
-- 规则数据仍以 `PTL/*.json` 为源，构建期由 `gen-ptl-header.ps1` 内嵌进 DLL。运行期以 DLL 为准；DLL 不存在或无效时才退回读取 `PTL/*.json`（开发/兼容模式）。
+- 规则数据以 `PTL/*.json` 为源（在 JERCPTL 仓），构建期由 JERCPTL 的 `gen-ptl-header.ps1` 内嵌进 DLL。运行期以 DLL 为准；DLL 不存在或无效时才退回读取安装目录下的 `PTL/*.json`（开发/兼容模式）。
 
 ### C ABI（导出表固定 5 个符号，全部 `extern "C"`）
 
@@ -35,9 +42,10 @@ int         jercpld_ptl_self_check(void);           // 0 = OK
 
 ## 官方支持范围
 
-- 客户端 **26.50–26.62**（协议 2193–2225）↔ 服务端 **26.50–26.51**（协议 2193）。
-- 主线只维护 `2193-2225.json`。
-- `2169-2193.json` 已移至 `examples/PTL/`，属非官方维护的示例，默认不安装；26.45 因传输层（RakNet-only 客户端 vs NetherNet 服务端）不可达，见 `docs/BLOCKERS.md` B4。
+- 客户端 **26.40–26.62**（协议 2168–2225）↔ 服务端 **26.50–26.51**（协议 2193）。
+- 主线内置三对规则：`2168-2169.json`、`2169-2193.json`、`2193-2225.json`，全部在 JERCPTL 仓，构建时全部内嵌。
+- 其中 `2168-2169` / `2169-2193` 属非官方维护；26.45 因传输层（RakNet-only 客户端 vs NetherNet 服务端）不可达，见 `docs/BLOCKERS.md` B4。
+- 本仓不再保留规则副本；规则源、构建脚本与格式说明见 JERCPTL 仓的 `PTL/` 与 `docs/PTL_FORMAT.md`。
 
 ## 目录与文件
 
@@ -136,7 +144,7 @@ int         jercpld_ptl_self_check(void);           // 0 = OK
 
 ## 新增一个版本对
 
-1. 新建 `PTL/<a>-<b>.json`，写 `ptlApi: 1` 与 `pair`。
+1. 在 JERCPTL 仓新建 `PTL/<a>-<b>.json`，写 `ptlApi: 1` 与 `pair`。
 2. 对称差异用 `rules` + `addedIn`；不对称差异用 `overrides` 分方向。
 3. 需要整包重编码时用 `builtin`，并在上表登记实现与反向状态。
 4. 用 `tools/verify-client` 跑该版本回归，抓包核对字段。

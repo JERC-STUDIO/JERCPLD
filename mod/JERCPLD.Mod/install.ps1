@@ -1,5 +1,6 @@
 param(
     [string]$ServerDir = 'd:\ylcs',
+    [string]$PtlDll = '',
     [switch]$SkipBuild
 )
 
@@ -20,11 +21,19 @@ Copy-Item $dll (Join-Path $target 'JERCPLD.dll') -Force
 Copy-Item (Join-Path $modRoot 'manifest.json') (Join-Path $target 'manifest.json') -Force
 Copy-Item (Join-Path $modRoot 'tooth.json') (Join-Path $target 'tooth.json') -Force -ErrorAction SilentlyContinue
 
-$ptlDll = Join-Path $modRoot 'build\JERCPLD.PTL.dll'
-if (-not (Test-Path $ptlDll)) { throw "missing $ptlDll, build first" }
+# PTL 规则模块由独立仓库 JERCPTL（github.com/JERC-STUDIO/JERCPTL）构建，本仓不再产出。
+# 未显式指定时，按「与本仓同级的 JERCPTL\build\JERCPLD.PTL.dll」查找。
+if (-not $PtlDll) {
+    $repoRoot  = Split-Path (Split-Path $modRoot -Parent) -Parent
+    $candidate = Join-Path (Split-Path $repoRoot -Parent) 'JERCPTL\build\JERCPLD.PTL.dll'
+    if (Test-Path $candidate) { $PtlDll = $candidate }
+}
+if (-not $PtlDll -or -not (Test-Path $PtlDll)) {
+    throw 'PTL 模块未找到：请先构建 JERCPTL 仓，或用 -PtlDll <路径> 指定 build\JERCPLD.PTL.dll'
+}
 $ptlDst = Join-Path $target 'PTL'
 New-Item -ItemType Directory -Force $ptlDst | Out-Null
-Copy-Item $ptlDll (Join-Path $ptlDst 'JERCPLD.PTL.dll') -Force
+Copy-Item $PtlDll (Join-Path $ptlDst 'JERCPLD.PTL.dll') -Force
 
 $configDir = Join-Path $target 'config'
 New-Item -ItemType Directory -Force $configDir | Out-Null
@@ -35,7 +44,7 @@ if (-not (Test-Path $configPath)) {
   "translationEnabled": true,
   "serverVersion": "1.26.51",
   "serverProtocol": 2193,
-  "acceptMinProtocol": 2193,
+  "acceptMinProtocol": 2168,
   "acceptMaxProtocol": 2225
 }
 '@

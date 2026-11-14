@@ -23,7 +23,7 @@ LeviLamina 原生 C++ mod，在 BDS 进程内做跨版本翻译。支持范围�
 | 方块调色板校验 | 已定位 -63 block_mismatch；StartGame `block_pallette_checksum` 清 0 跳过校验（勿回退） |
 | 内置抓包 | 已完成（默认关闭，可运行中热开启） |
 | 自动自检 | `tools/verify-client/verify.js`（NetherNet / RakNet） |
-| 版本链结构 | 已完成单文件 PTL 模块：`plugins/JERCPLD/PTL/JERCPLD.PTL.dll`（C ABI + 内嵌规则 + 失败隔离） |
+| 版本链结构 | 已完成单文件 PTL 模块：`plugins/JERCPLD/PTL/JERCPLD.PTL.dll`（C ABI + 内嵌规则 + 失败隔离）；规则模块源码在独立仓库 [JERC-STUDIO/JERCPTL](https://github.com/JERC-STUDIO/JERCPTL) |
 | 反向（2225 服务端 + 2193 客户端） | **仅代码 + 离线往返验证**；本机缺可用的 LeviLamina 26.60，未跑真实服务端 |
 
 ## 0.0.2 更新（2026-11-13）
@@ -35,29 +35,34 @@ LeviLamina 原生 C++ mod，在 BDS 进程内做跨版本翻译。支持范围�
 - **可观测性**：每连接一行 `[CONN]`（协议/跳数/144 处理方式/累计耗时），30 秒 `[PERF]` 汇总（默认关闭）。
 - **文档**：`PACKET_FIELDS_2169_2193_2225.md`、`REPO_SPLIT_PLAN.md`、`PTL.md`、`HANDOFF.md`、`RAKNET_TRANSPORT_DESIGN.md`。
 
-## PTL 规则文件
+## PTL 规则模块（独立仓库）
 
 翻译规则以**单个 DLL** 交付：`plugins/JERCPLD/PTL/JERCPLD.PTL.dll`，一个文件承载全部支持的版本对。
-规则源仍是 `PTL/*.json`，构建期内嵌进 DLL；主插件通过 5 个 C ABI 导出读取规则，解析后立即卸载模块。
-加载失败（API 版本/导出/自检/JSON）只拒绝该模块，不影响服务端；DLL 不存在时退回 JSON（兼容模式）。
-格式、ABI、失败隔离与单模块取舍见 [docs/PTL.md](docs/PTL.md)。
+
+**本仓库只含引擎**：协议 hook、翻译调度、config、capture、模块加载与 ABI 校验。
+规则源（`PTL/*.json`）、`JERCPLD.PTL.cpp` 与 `gen-ptl-header.ps1` 已迁到独立仓库
+[JERC-STUDIO/JERCPTL](https://github.com/JERC-STUDIO/JERCPTL)，本仓构建不再产出 PTL DLL。
+
+主插件通过 5 个 C ABI 导出读取规则，解析后立即卸载模块；加载失败（API 版本/导出/自检/JSON）只拒绝该模块，
+不影响服务端；DLL 不存在时退回 `PTL/*.json`（兼容模式）。格式、ABI、失败隔离与单模块取舍见 [docs/PTL.md](docs/PTL.md)。
 
 ## 新增一个客户端版本的步骤
 
-1. 在 `PTL/` 新建 `<旧协议>-<新协议>.json`（格式见 `docs/PTL.md`）。
+1. 在 [JERCPTL](https://github.com/JERC-STUDIO/JERCPTL) 的 `PTL/` 新建 `<旧协议>-<新协议>.json`（格式见 `docs/PTL.md`）。
 2. 对称差异用 `rules` + `addedIn`；不对称差异用 `overrides` 分方向写。
 3. 需要整包重编码时用 `builtin`，并在 `docs/PTL.md` 的内置能力表登记。
-4. 重新运行 `build.bat`：会把全部 `PTL/*.json` 内嵌进 `JERCPLD.PTL.dll`。
-5. 把版本号纳入 `acceptMinProtocol` / `acceptMaxProtocol`。
+4. 在 JERCPTL 仓运行 `build.bat`：会把全部 `PTL/*.json` 内嵌进 `JERCPLD.PTL.dll`。
+5. 把版本号纳入本仓 config 的 `acceptMinProtocol` / `acceptMaxProtocol`。
 6. 用 `tools/verify-client/run-regression.ps1` 跑模拟客户端回归，并抓包逐字段核对。
 
 详细差异清单与反向实现状态见 `docs/PACKET_DIFF_2193_2225.md`。
 
 ## 产物与安装
 
-- 构建产物：`mod/JERCPLD.Mod/build/JERCPLD.dll` 与 `build/JERCPLD.PTL.dll`
-- 安装目录：`d:\ylcs\plugins\JERCPLD\`（DLL + PTL/JERCPLD.PTL.dll + manifest.json + tooth.json + config/config.json）
-- 一键安装：`mod/JERCPLD.Mod/install.ps1 -ServerDir d:\ylcs`（加 `-SkipBuild` 可只复制现有 DLL）
+- 本仓构建产物：`mod/JERCPLD.Mod/build/JERCPLD.dll`（引擎）
+- PTL 模块产物：`JERCPLD.PTL.dll`（由 JERCPTL 仓构建）
+- 安装目录：`plugins/JERCPLD/`（JERCPLD.dll + PTL/JERCPLD.PTL.dll + manifest.json + tooth.json + config/config.json）
+- 一键安装：`mod/JERCPLD.Mod/install.ps1 -ServerDir d:\ylcs -PtlDll <JERCPTL 的 build\JERCPLD.PTL.dll>`（加 `-SkipBuild` 可只复制现有 DLL）
 
 配置项（`plugins/JERCPLD/config/config.json`，抓包段支持热读取）：
 
@@ -88,7 +93,7 @@ LeviLamina 原生 C++ mod，在 BDS 进程内做跨版本翻译。支持范围�
 ## 安装
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File d:\ylcs\JERCPLD\mod\JERCPLD.Mod\install.ps1 -ServerDir d:\ylcs
+powershell -ExecutionPolicy Bypass -File <本仓>\mod\JERCPLD.Mod\install.ps1 -ServerDir <服务器目录> -PtlDll <JERCPTL>\build\JERCPLD.PTL.dll
 ```
 
 脚本会编译并复制到 `plugins\JERCPLD\`：
@@ -99,6 +104,7 @@ plugins/JERCPLD/
   manifest.json
   tooth.json
   config/config.json
+  PTL/JERCPLD.PTL.dll      # 由 JERCPTL 仓构建，经 -PtlDll 传入
 ```
 
 配置项（`config/config.json`）：
