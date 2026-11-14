@@ -17,9 +17,13 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `jercpld-capture %s — 读取 bedrocktool 的 .pcap2,用 1001 / 2168 两套 schema 交叉解析
 
 用法:
-  jercpld-capture analyze [flags] <file.pcap2 | dir>...
-  jercpld-capture verdict [flags] <file.pcap2 | dir>...
-  jercpld-capture hex     [flags] <file.pcap2>...
+  jercpld-capture analyze [flags] <pcap2|log|dir>...
+  jercpld-capture verdict [flags] <pcap2|log|dir>...
+  jercpld-capture hex     [flags] <pcap2|log>...
+
+输入格式(按后缀自动识别):
+  .pcap2          bedrocktool capture 产物(二进制 + s2 压缩,已解密)
+  session-*.log   JERCPLD capture 产物(文本 HEX,见 docs/CAPTURE.md)
 
 命令:
   analyze   列出包分布,并对关注的包做双 spec 解析
@@ -487,7 +491,12 @@ func collectFiles(args []string) ([]string, error) {
 			if d.IsDir() {
 				return nil
 			}
-			if strings.HasSuffix(strings.ToLower(d.Name()), ".pcap2") {
+			lower := strings.ToLower(d.Name())
+			if strings.HasSuffix(lower, ".pcap2") {
+				add(p)
+				return nil
+			}
+			if strings.HasSuffix(lower, ".log") && strings.Contains(lower, "session-") {
 				add(p)
 			}
 			return nil
@@ -502,19 +511,30 @@ func collectFiles(args []string) ([]string, error) {
 }
 
 // loadAll 读取所有文件,把每个文件的错误收集起来但不中断。
+// 按后缀分派:.pcap2 走 bedrocktool 的二进制格式,其余走 JERCPLD 的文本日志。
 // ReadPcap2 在版本不符时会同时返回记录和错误,这里保留记录。
 func loadAll(files []string) ([]Record, []error) {
 	var recs []Record
 	var warns []error
 
 	for _, f := range files {
-		r, err := ReadPcap2(f)
+		var r []Record
+		var err error
+		if isPcap2(f) {
+			r, err = ReadPcap2(f)
+		} else {
+			r, err = ReadJERCPLDLog(f)
+		}
 		if err != nil {
 			warns = append(warns, fmt.Errorf("%s: %w", f, err))
 		}
 		recs = append(recs, r...)
 	}
 	return recs, warns
+}
+
+func isPcap2(path string) bool {
+	return strings.HasSuffix(strings.ToLower(path), ".pcap2")
 }
 
 func filterRecords(recs []Record, want map[uint32]bool, dir string) []Record {

@@ -243,3 +243,41 @@ go get github.com/klauspost/compress/s2
 ```bash
 GOOS=linux GOARCH=amd64 go build -o jercpld-capture-linux .
 ```
+
+---
+
+## 7. 两种输入格式
+
+工具按后缀自动识别，两者共用同一套 schema 判定逻辑。
+
+### 7.1 `.pcap2`（bedrocktool）
+
+二进制 + s2 压缩，格式见 §2。需要 bedrocktool 能连上目标版本——而 **gophertunnel 同一时间只支持一个协议版本**，`bedrock-tool/gophertunnel` 当前是：
+
+```go
+// minecraft/protocol/info.go
+CurrentProtocol = 2225
+CurrentVersion  = "1.26.60"
+```
+
+也就是说 bedrocktool 现在只能连 **1.26.60**。要抓 2168 的包，得把这两行改成 `2168` / `"1.26.40"` 重编译，或者换用对应版本的 gophertunnel 分支。改常量能不能跑通取决于 `StartGame` 等握手包在 2168 与 2225 之间的差异——`handlers/capture.go` 的 `PacketFunc` 只读 `header.PacketID`、不解析 payload，所以只要连接能建立，dump 出来的字节就是可信的。
+
+### 7.2 `session-*.log`（JERCPLD 自带 capture）
+
+JERCPLD 在 BDS 内部抓包，不依赖外部协议库，抓的是 `translateOutboundPacket` 之后的字节：
+
+```text
+00:30:20.138 s2c id=58 name=FullChunkData len=9297
+HEX 3ab101d007000001120000c348...
+```
+
+- 一个 header 行后可以跟多行 `HEX`，拼接后是完整包字节（varint packetID + payload）
+- 方向在 header 行：`c2s` / `s2c`
+- 其他行（`[CONN]` / `[PERF]`）自动忽略
+- 开启方式见 `docs/CAPTURE.md`：`capture.enabled=true`
+
+**这是抓 2168 更稳的路径**：让 1.26.40 客户端连经 JERCPLD 中转的 1.26.51 服务端，JERCPLD 输出的 s2c 就是 2168 格式，不需要 bedrocktool 支持那个版本。
+
+```bash
+jercpld-capture verdict diagnostics/
+```
