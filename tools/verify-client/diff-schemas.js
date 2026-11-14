@@ -1,12 +1,16 @@
 #!/usr/bin/env node
-// 穷举对比 2193 (1.26.51) 与 2225 (1.26.60) 的包结构差异
+// 穷举对比两个客户端版本（默认 2193(1.26.51) 与 2225(1.26.60)）的包结构差异
 // 覆盖全部 packet_* 类型（含递归嵌套类型与枚举值），默认只输出有差异的条目。
 // 用法：
-//   node diff-schemas.js              # 全部差异
-//   node diff-schemas.js start_game   # 只看指定包
+//   node diff-schemas.js                     # 1.26.51 vs 1.26.60
+//   node diff-schemas.js 1.26.45 1.26.51     # 指定版本对
+//   node diff-schemas.js 1.26.45 1.26.51 start_game   # 只看指定包
 const base = './node_modules/minecraft-data/minecraft-data/data/bedrock/'
-const oldP = require(base + '1.26.51/protocol.json')
-const newP = require(base + '1.26.60/protocol.json')
+const OLD_VER = process.argv[2] || '1.26.51'
+const NEW_VER = process.argv[3] || '1.26.60'
+const oldP = require(base + OLD_VER + '/protocol.json')
+const newP = require(base + NEW_VER + '/protocol.json')
+console.log(`# ${OLD_VER} vs ${NEW_VER}`)
 
 const MAX_DEPTH = 14
 
@@ -123,7 +127,7 @@ function diffType (name, aType, bType, path, out, depth) {
   if (JSON.stringify(ra) !== JSON.stringify(rb)) out.push(`${path}: ${a[0]} 参数变化 ${JSON.stringify(ra)} -> ${JSON.stringify(rb)}`)
 }
 
-const filter = process.argv[2]
+const filter = process.argv[4]
 
 function packetIds (proto) {
   const t = proto.types.mcpe_packet

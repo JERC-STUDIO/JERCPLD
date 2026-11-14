@@ -2659,27 +2659,22 @@ bool ptlSkipVarint(std::string const& data, size_t& pos) {
     return false;
 }
 
-// boss_event：2193 在 event_type 之后多了 player_id，且只有 add(0) / remove(1) 事件才带。
-// 旧实现无条件在 boss_entity_id 之后插入/删除，位置错了一个字段，会破坏后续字段解析。
+// boss_event：2169（1.26.45）在 target_entity_id 之后无条件带 player_id(zigzag64)，
+// 2193（1.26.51）没有该字段。方向必须与版本一致：
+//   2169 -> 2193 删除 player_id；2193 -> 2169 插入 0（无归属）。
 bool bossEventTo2193(std::string& data, size_t payloadOffset) {
     size_t pos = payloadOffset;
-    if (!ptlSkipVarint(data, pos)) return false; // boss_entity_id
-    size_t   typeOff = pos;
-    if (!ptlSkipVarint(data, pos)) return false; // event_type
-    if (readVarUInt(data, typeOff) > 1) return true;
-    data.insert(pos, 1, '\0'); // 仅 add/remove 需要 player_id
+    if (!ptlSkipVarint(data, pos)) return false; // target_entity_id
+    size_t start = pos;
+    if (!ptlSkipVarint(data, pos)) return false; // player_id
+    data.erase(start, pos - start);
     return true;
 }
 
 bool bossEventTo2169(std::string& data, size_t payloadOffset) {
     size_t pos = payloadOffset;
-    if (!ptlSkipVarint(data, pos)) return false; // boss_entity_id
-    size_t   typeOff = pos;
-    if (!ptlSkipVarint(data, pos)) return false; // event_type
-    if (readVarUInt(data, typeOff) > 1) return true;
-    size_t start = pos;
-    if (!ptlSkipVarint(data, pos)) return false; // player_id
-    data.erase(start, pos - start);
+    if (!ptlSkipVarint(data, pos)) return false; // target_entity_id
+    data.insert(pos, 1, '\0');                   // player_id = 0
     return true;
 }
 
