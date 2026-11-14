@@ -171,7 +171,7 @@ func readMetaValue(c *Cursor, typ uint32) error {
 	case 3: // float
 		c.F32()
 	case 4: // string
-		c.String()
+		_ = c.String()
 	case 5: // compound:NBT payload,无外层 tag/name
 		return skipNBTCompound(c)
 	case 6: // vec3i
