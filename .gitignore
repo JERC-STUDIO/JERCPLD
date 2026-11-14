@@ -2,7 +2,8 @@
 bin/
 obj/
 build/
-dist/
+dist/*
+!dist/jercpld-windows-x64.zip
 out/
 *.obj
 *.o
