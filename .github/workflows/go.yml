@@ -1,0 +1,87 @@
+# ============================================================================
+# JERCPLD 辅助工具 CI —— jercpld-capture（Go）
+#
+# 本 workflow 只负责 tools/jercpld-capture 下的 Go 工具（bedrocktool .pcap2
+# 抓包解析 -> Record 流）。它与仓库根目录 build.yml 的 C# / C++ 主构建**完全解耦**：
+#   * 触发路径独立：仅当 Go 工具目录有改动时才运行，不拉长主构建队列；
+#   * 工具链独立：使用 Go 'stable'，不复用主构建的 MSBuild / CMake / vcpkg 环境；
+#   * 结果独立：本 workflow 失败不阻塞主构建，主构建失败也不阻塞本工具；
+#   * 无额外 secret：仅使用 checkout / setup-go 两个官方 action 与默认 GITHUB_TOKEN，
+#     不需要任何自定义 Secrets（私有依赖请走公开模块或 vendoring）。
+#
+# 步骤：checkout -> setup-go -> go mod download -> (容错) go mod tidy
+#       -> go vet ./... -> go build ./... -> go test ./...
+# ============================================================================
+
+name: Go · jercpld-capture
+
+on:
+  push:
+    paths:
+      - 'tools/jercpld-capture/**'
+  pull_request:
+    paths:
+      - 'tools/jercpld-capture/**'
+
+# 只读权限即可，避免任何写操作依赖额外凭据
+permissions:
+  contents: read
+
+# 同一分支连续推送时取消旧运行，节省额度
+concurrency:
+  group: go-capture-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 所有 run 步骤默认在工具目录执行（与仓库根目录的 C#/C++ 构建互不干扰）
+defaults:
+  run:
+    working-directory: tools/jercpld-capture
+
+jobs:
+  vet-build-test:
+    name: go vet + build + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # go.sum 可能尚未提交（依赖刚刚引入 / 首次 tidy 前）。
+      # setup-go 的缓存恢复会解析 cache-dependency-path，路径不存在时该步骤会直接报
+      # "Some specified paths were not resolved"，从而让整个 job 在第一步就失败。
+      # 这里先保证文件存在，空 go.sum 对无依赖模块是合法的，后续 tidy 会补全内容。
+      - name: Ensure go.sum exists
+        run: |
+          if [ ! -f go.sum ]; then
+            : > go.sum
+            echo "go.sum 不存在，已创建空文件（等待 go mod tidy 填充）"
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: true
+          cache-dependency-path: tools/jercpld-capture/go.sum
+
+      # go.sum 缺失或条目不全时 go mod download 会以 "missing go.sum entry" 失败，
+      # 这里容忍，真正的依赖问题交给下面的 vet/build/test 暴露。
+      - name: go mod download
+        continue-on-error: true
+        run: go mod download
+
+      # 容错补齐 go.mod / go.sum（例如新增 import 后尚未 tidy）。
+      # 允许失败：不允许因为本地忘记 tidy 就把整个 CI 判死。
+      - name: go mod tidy (tolerant)
+        continue-on-error: true
+        run: go mod tidy
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test ./...
