@@ -112,62 +112,67 @@ mob_equipment (31)                mob_armor_equipment (32)
 
 #### ① item 栈格式（影响 12 / 15 / 31 / 32）
 
-1001 的 `Item`：
+**依据**：CloudburstMC/Protocol 3.0 的 `v975/BedrockCodecHelper_v975.java`（1001 继承自它）与 `v2168/BedrockCodecHelper_v2168.java`（2168 的独立实现）。
+
+1001 与 2168 的 `NetworkItemStackDescriptor` **几乎相同**：
 
 ```
-network_id      zigzag32 varint
-  if network_id == 0 : 结束（air 只占 1 字节）
-  else:
-    count             lu16
-    metadata          varint
-    has_stack_id      u8
-    stack_id          if has_stack_id != 0: zigzag32
-    block_runtime_id  zigzag32
-    extra             varint 长度 + NBT
-```
-
-2168 的 `ItemV4`：
-
-```
-network_id      li16（固定 2 字节小端，不是 varint！）
-count           lu16          ← air 也照写
-metadata        varint
-has_stack_id    bool
-stack_id        if true: zigzag32
+network_id       li16            ← 两边都是固定 2 字节小端
+count            lu16            ← air 也照写，不短路
+damage           varint
+has_stack_id     u8
+  if has_stack_id:
+      1001: variant_type(varint) + stack_id(zigzag)   ← 多一个
+      2168: stack_id(zigzag)
 block_runtime_id varint
-extra           varint 长度 + NBT
+extra_len        varint + bytes
 ```
 
-**转换规则**（1001 → 2168，s2c 方向）：
+**关键结论**：
 
-1. 读 zigzag32 `network_id`；
-2. 写 li16；
-3. 若 `network_id == 0`（air），补写 `count=0, metadata=0, has_stack_id=0, block_runtime_id=0, extra_len=0`；
-4. 否则按原值逐字段改写，`block_runtime_id` 由 zigzag32 变 varint（对非负值编码相同，可原样拷贝）。
+1. **air（network_id == 0）在两边逐字节相同，都是 8 字节**：
+   `li16(0)` + `lu16(0)` + `varint(0)` + `u8(0)` + `varint(0)` + `varint(0)`。
+   旧版本本文档写的「1001 短路 1 字节」是错的——`v975` 的 `writeNetworkItemStackDescriptor`
+   无条件写 `count`，没有 `networkId == 0` 的短路分支。
+2. 真正的差异只在 `has_stack_id == true` 时：1001 多一个 `variant_type`（`v975` 里硬编码写 0）。
+3. `block_runtime_id` 两边都是无符号 varint，不是 zigzag。
+
+**转换规则**（2168 → 1001，s2c 方向）：
+
+- air：原样拷贝，不做事。
+- 带 stack_id：读完 `has_stack_id` 后先写一个 `varint(0)` 作为 `variant_type`，再写 `stack_id`。
 
 风险：`li16` 有符号上限 32767，若未来 item id 超界会截断——当前物品表约 2000，安全。
 
 #### ② metadata 字典（影响 12 / 13 / 15）
+
+**依据**：`v361/BedrockCodecHelper_v361.java`（1001 的 `writeEntityData`）与 `v2168` 的同名方法。
 
 ```
 1001:  key(varint) + type(varint) + value(switch)
 2168:  key(varint) + type(varint) + legacy_type(u8) + value(switch)
 ```
 
-每个条目多 1 字节 `legacy_type`。遍历全部条目，在 `type` 之后插入该字节。
+**结论：`legacy_type` 确实存在**，2168 每个条目多 1 字节，值是 `type` 的副本
+（`v2168` 里是 `buffer.writeByte(definition.getFormat().ordinal())`）。
 
-**这一条存疑**：`legacy_type` 在真实 Bedrock 线格式里通常不存在，很可能是 minecraft-data 的建模差异。仓库此前已因同类问题给 1.26.40/45 打过补丁（`docs/STATE.json:91` 末句：「官方文档确认 2168/2169/2193 wire 一致，社区 schema 建模错误」）。**必须先抓包确认**，否则加了这一字节会直接让实体包解析失败。
+转换：2168 → 1001 时，读完 `type` 后丢弃那 1 字节；1001 → 2168 时补上 `type` 的副本。
 
 #### ③ move_player teleport（19）
 
+**依据**：`v291/serializer/MovePlayerSerializer_v291.java`（1001 继承）与 `v2168` 的同名类。
+
 ```
-1001: teleport = switch(mode == "teleport") { cause: li32, source_entity_type: varint }
-2168: teleport = option { cause: li32, source_entity_type: varint }
+1001: if (mode == TELEPORT) { cause(li32) + entityType(li32) }                 ← switch，无前缀
+2168: writeOptional(..., mode == TELEPORT) { cause(li32) + entityType(li32) }  ← option，1 字节 bool 前缀
 ```
 
-`option` 在字段前多 1 字节 bool。转换：当 `mode == teleport` 时补 `01`，否则补 `00`。
+**结论：2168 是 option，带 1 字节 bool 前缀；1001 是 switch，无前缀。**
 
-同样需要抓包确认——若 2168 的 `option` 实际不带前缀（`optionalOnRemaining` 语义），则此包**无需改动**。
+转换：2168 → 1001 时，读掉那个 bool，保留后续 8 字节（cause + entityType）。
+只有 `mode == teleport` 的包需要处理，其余 mode 两边一致。
+
+注意 `cause` 与 `entityType` 在两边都是 **li32（4 字节小端）**，不是 varint。
 
 #### ④ device_os（12）
 
@@ -282,23 +287,45 @@ bool metadata1001To2168(PacketCursor& in, std::string& out);
 - `tests/ptl1001/test_item1001.cpp` —— 6 组用例，`g++ -std=c++20` 编译通过，全部 PASS
 
 ```
-[1] air item: 1001 单字节 00 -> 2168 八字节      PASS
+[1] air item: 2168 八字节 -> 1001 八字节（原样）   PASS
 [2] 普通物品: id=5 count=3                      PASS
-[3] 带 stack_id 与 extra                       PASS
-[4] 往返: 2168 air -> 1001                      PASS
-[5] 往返: 1001 -> 2168 -> 1001 保值              PASS
+[3] 带 stack_id: 2168 无 variant -> 1001 补 0    PASS
+[4] 往返: 1001 -> 2168 -> 1001 保值              PASS
 ALL PASS (fail=0)
 ```
 
-写测试时抓到一个真实 bug：`ItemV4` 没有 `network_id == 0` 的短路分支，air 物品在 2168 侧仍写满 8 字节；反向转换若只读 2 字节 `li16` 就返回，会让紧随其后的字段整体错位 6 字节。已修正为「air 也要消费尾部字段，但 1001 侧只输出 1 字节」。
+**旧 PoC 的 air 分支已删除。** 原实现认为 1001 侧 air 只占 1 字节，
+依据是 minecraft-data 的 schema；但 CloudburstMC/Protocol 的 `v975` 明确写着
+`writeShortLE(item.getCount())` 无条件执行，air 不短路。按旧逻辑发出的包会少 7 字节，
+客户端从 item 之后整体错位，直接崩。
 
-> 注意：这个 8 字节结论建立在 minecraft-data 的 schema 上。若真机抓包显示 2168 的 air 只有 2 字节，则 `item1001To2168` 的 air 分支也要相应改成只写 `li16`。抓一帧 12 add_player（手持空）即可判定。
+**已实现**（`mod/JERCPLD.Mod/src/JercpldPtl1001.h`）：
 
-未实现（等抓包结论）：metadata 的 `legacy_type`、move_player 的 teleport option、disconnect 的 reason 重映射。
+| 函数 | 包 | 内容 |
+| --- | --- | --- |
+| `fixMobEquipment` | 31 | item 的 stack_id variant |
+| `fixMobArmorEquipment` | 32 | 4 个 item |
+| `fixAddItemEntity` | 15 | item + metadata 的 legacy_type |
+| `fixMovePlayer` | 19 | teleport 的 option 前缀 |
+
+已接入 `translateOutboundPacket` 的 `peerProtocol < 2168` 分支，失败时回滚原包并记日志。
+
+**未实现**：
+
+- 12 `add_player` / 13 `add_entity` 的 metadata 段——这两个包前缀字段多
+  （add_player 有 uuid / username / entity 元数据 / 属性表等），需要精确的字段偏移才能
+  定位 metadata 起点。目前 metadata 转换函数已就绪，缺的是前缀解析。
+- 5 `disconnect` 的 reason 枚举重映射（只影响提示文案）。
 
 ## 九、一句话总结
 
 26.33 是 26.30 的热修复，协议号同为 1001，**不存在「26.33 的协议」**。
-真正要做的是：先用 S10 的 RakNet 实例验证 26.33 能进（大概率直接过），
-再抓包判定 6 个 s2c 差异是真实线格式变化还是社区 schema 假差异，
-确认后再补 `translateOutboundPacket` 的 `<2168` 分支。
+
+三个待确认项已由 CloudburstMC/Protocol 3.0 的实现定死：
+
+1. Item 的 air 两边都是 8 字节，**不需要转换**；差异在 `has_stack_id` 的 variant 前缀。
+2. metadata 的 `legacy_type` **真实存在**，2168 每条目多 1 字节。
+3. teleport 在 2168 是 option（带前缀），在 1001 是 switch（无前缀）。
+
+`1.26.50` 的协议号是 **2193**（见 CloudburstMC 的 VERSIONS.md），与 2168 在 item 上同构，
+可以用来交叉验证。

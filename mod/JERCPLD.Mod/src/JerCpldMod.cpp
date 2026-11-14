@@ -21,6 +21,8 @@
 #include "mc/network/packet/LoginPacket.h"
 #include "mc/network/packet/RequestNetworkSettingsPacket.h"
 
+#include "JercpldPtl1001.h"
+
 // LeviLamina 26.51.5 源码包缺少 ll/api/service/TargetedBedrock.h，
 // 直接声明已导出的 getServerNetworkHandler / getRakPeer。
 namespace RakNet {
@@ -1982,6 +1984,55 @@ void translateOutboundPacket(std::string& data, int peerProtocol) {
             hookLog("[JERCPLD] outbound StartGame rewrite FAILED for peer<2168, original preserved");
         }
         return;
+    }
+    // peer < 2168: 实体 / 物品类包的线格式差异。
+    // 依据 CloudburstMC/Protocol 3.0 的实际实现（不是 minecraft-data 的 schema）：
+    //   Item:     1001 在 has_stack_id 为真时多一个 variantType(varint)；air 两边都是 8 字节
+    //   metadata: 2168 每个条目多 1 字节 legacy_type（值为 type 的副本）
+    //   teleport: 2168 是 option（带 bool 前缀），1001 是 switch（无前缀）
+    if (peerProtocol < 2168) {
+        switch (packetId) {
+        case 15: { // add_item_entity
+            std::string original = data;
+            if (jercpld1001::fixAddItemEntity(data)) {
+                hookLog("[JERCPLD] outbound add_item_entity 2168->1001: {} -> {}", original.size(), data.size());
+            } else {
+                data = std::move(original);
+                hookLog("[JERCPLD] outbound add_item_entity fix failed, preserved: len={}", data.size());
+            }
+            return;
+        }
+        case 19: { // move_player
+            std::string original = data;
+            if (jercpld1001::fixMovePlayer(data)) {
+                hookLog("[JERCPLD] outbound move_player teleport prefix stripped: {} -> {}", original.size(), data.size());
+            } else {
+                data = std::move(original);
+                hookLog("[JERCPLD] outbound move_player fix failed, preserved: len={}", data.size());
+            }
+            return;
+        }
+        case 31: { // mob_equipment
+            std::string original = data;
+            if (jercpld1001::fixMobEquipment(data)) {
+                hookLog("[JERCPLD] outbound mob_equipment 2168->1001: {} -> {}", original.size(), data.size());
+            } else {
+                data = std::move(original);
+                hookLog("[JERCPLD] outbound mob_equipment fix failed, preserved: len={}", data.size());
+            }
+            return;
+        }
+        case 32: { // mob_armor_equipment
+            std::string original = data;
+            if (jercpld1001::fixMobArmorEquipment(data)) {
+                hookLog("[JERCPLD] outbound mob_armor_equipment 2168->1001: {} -> {}", original.size(), data.size());
+            } else {
+                data = std::move(original);
+                hookLog("[JERCPLD] outbound mob_armor_equipment fix failed, preserved: len={}", data.size());
+            }
+            return;
+        }
+        }
     }
     if (peerProtocol != 2225) return; // 其余 s2c 结构改写仅 2225 需要
     switch (packetId) {
