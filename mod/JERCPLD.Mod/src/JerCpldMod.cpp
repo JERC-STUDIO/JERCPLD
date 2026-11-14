@@ -75,7 +75,7 @@ NetherNet::NetworkID::NetworkID() = default;
 namespace jercpld {
 
 constexpr char const* kModName  = "JERCPLD";
-constexpr char const* kVersion  = "0.0.2";
+constexpr char const* kVersion  = "0.0.3-test.1";
 
 struct CaptureConfig {
     bool             enabled      = false;
