@@ -346,6 +346,103 @@ inline bool metadata1001To2168(Reader& in, std::string& out) {
 
 // ---------------- 包级转换（2168 -> 1001） ----------------
 
+// varint 长度前缀 + UTF-8
+inline bool skipString(Reader& in) {
+    uint64_t len = in.var();
+    if (!in.ok) return false;
+    in.skip(static_cast<size_t>(len));
+    return in.ok;
+}
+
+// add_entity(13)，字段序列来自 v557/AddEntitySerializer_v557：
+//   uniqueEntityId   zigzag64
+//   runtimeEntityId  varuint64
+//   identifier       string
+//   position         vec3f   (12)
+//   motion           vec3f   (12)
+//   rotation         vec2f   (8)
+//   headRotation     f32     (4)
+//   bodyRotation     f32     (4)
+//   attributes       count(varuint) + N × (name string + min f32 + value f32 + max f32)
+//   metadata         ← 差异点
+//   properties / links 原样拷贝
+inline bool fixAddEntity(std::string& data) {
+    Reader in(data, 0, data.size());
+
+    (void)in.zigzag();        // uniqueEntityId
+    (void)in.var();           // runtimeEntityId
+    if (!skipString(in)) return false;   // identifier
+    in.skip(12);              // position
+    in.skip(12);              // motion
+    in.skip(8);               // rotation (vec2f)
+    in.skip(4);               // headRotation
+    in.skip(4);               // bodyRotation
+    if (!in.ok) return false;
+
+    uint64_t attrCount = in.var();
+    if (!in.ok) return false;
+    for (uint64_t i = 0; i < attrCount; i++) {
+        if (!skipString(in)) return false;  // attribute name
+        in.skip(12);                        // min + value + max
+        if (!in.ok) return false;
+    }
+
+    std::string out;
+    out.reserve(data.size() + 32);
+    out.append(data, 0, in.p);
+
+    if (!metadata2168To1001(in, out)) return false;
+
+    in.copy(in.end - in.p, out);           // properties + links
+    if (!in.ok) return false;
+
+    data = std::move(out);
+    return true;
+}
+
+// add_player(12)，字段序列来自 v557/AddPlayerSerializer_v557：
+//   uuid             16 字节
+//   username         string
+//   runtimeEntityId  varuint64
+//   platformChatId   string
+//   position         vec3f   (12)
+//   motion           vec3f   (12)
+//   rotation         vec3f   (12)
+//   hand             Item    ← 与 mob_equipment 同一个 NetworkItemStackDescriptor
+//   gameType         zigzag32
+//   metadata         ← 差异点
+//   properties / abilities / links / deviceId / buildPlatform 原样拷贝
+inline bool fixAddPlayer(std::string& data) {
+    Reader in(data, 0, data.size());
+
+    in.skip(16);              // uuid
+    if (!skipString(in)) return false;   // username
+    (void)in.var();           // runtimeEntityId
+    if (!skipString(in)) return false;   // platformChatId
+    in.skip(12);              // position
+    in.skip(12);              // motion
+    in.skip(12);              // rotation (vec3f)
+    if (!in.ok) return false;
+
+    std::string out;
+    out.reserve(data.size() + 16);
+    out.append(data, 0, in.p);
+
+    if (!item2168To1001(in, out)) return false;   // hand
+
+    int64_t gameType = in.zigzag();
+    if (!in.ok) return false;
+    putZigZag(out, gameType);
+
+    if (!metadata2168To1001(in, out)) return false;
+
+    in.copy(in.end - in.p, out);                  // 尾部原样
+    if (!in.ok) return false;
+
+    data = std::move(out);
+    return true;
+}
+
 // mob_equipment(31)：runtimeId(varlong) + item + slot(u8) + selected(u8) + window(u8)
 inline bool fixMobEquipment(std::string& data) {
     Reader in(data, 0, data.size());

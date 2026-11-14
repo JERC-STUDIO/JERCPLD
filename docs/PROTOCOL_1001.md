@@ -310,11 +310,29 @@ ALL PASS (fail=0)
 
 已接入 `translateOutboundPacket` 的 `peerProtocol < 2168` 分支，失败时回滚原包并记日志。
 
+**已实现（续）**：
+
+| 函数 | 包 | 内容 |
+| --- | --- | --- |
+| `fixAddPlayer` | 12 | hand 的 item + metadata |
+| `fixAddEntity` | 13 | attributes 之后的 metadata |
+
+两个包的前缀字段序列取自 `v557/AddPlayerSerializer_v557` 与
+`v557/AddEntitySerializer_v557`——1001 和 2168 都继承 v557，所以**前缀完全相同**，
+只有 metadata 段有差异：
+
+```
+add_entity(13): uniqueId(zigzag64) + runtimeId(varuint64) + identifier(string)
+              + pos(12) + motion(12) + rot(8) + headRot(4) + bodyRot(4)
+              + attributes(count + N × (name string + 12))
+              → metadata
+add_player(12): uuid(16) + username(string) + runtimeId(varuint64) + platformChatId(string)
+              + pos(12) + motion(12) + rot(12) + hand(Item) + gameType(zigzag32)
+              → metadata
+```
+
 **未实现**：
 
-- 12 `add_player` / 13 `add_entity` 的 metadata 段——这两个包前缀字段多
-  （add_player 有 uuid / username / entity 元数据 / 属性表等），需要精确的字段偏移才能
-  定位 metadata 起点。目前 metadata 转换函数已就绪，缺的是前缀解析。
 - 5 `disconnect` 的 reason 枚举重映射（只影响提示文案）。
 
 ## 九、一句话总结

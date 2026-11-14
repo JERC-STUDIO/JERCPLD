@@ -1992,6 +1992,26 @@ void translateOutboundPacket(std::string& data, int peerProtocol) {
     //   teleport: 2168 是 option（带 bool 前缀），1001 是 switch（无前缀）
     if (peerProtocol < 2168) {
         switch (packetId) {
+        case 12: { // add_player
+            std::string original = data;
+            if (jercpld1001::fixAddPlayer(data)) {
+                hookLog("[JERCPLD] outbound add_player 2168->1001: {} -> {}", original.size(), data.size());
+            } else {
+                data = std::move(original);
+                hookLog("[JERCPLD] outbound add_player fix failed, preserved: len={}", data.size());
+            }
+            return;
+        }
+        case 13: { // add_entity
+            std::string original = data;
+            if (jercpld1001::fixAddEntity(data)) {
+                hookLog("[JERCPLD] outbound add_entity 2168->1001: {} -> {}", original.size(), data.size());
+            } else {
+                data = std::move(original);
+                hookLog("[JERCPLD] outbound add_entity fix failed, preserved: len={}", data.size());
+            }
+            return;
+        }
         case 15: { // add_item_entity
             std::string original = data;
             if (jercpld1001::fixAddItemEntity(data)) {
