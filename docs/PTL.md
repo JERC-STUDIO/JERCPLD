@@ -64,7 +64,7 @@ int         jercpld_ptl_self_check(void);           // 0 = OK
 }
 ```
 
-- `ptlApi`：插件规则 API 版本。当前只接受 `1`；不匹配时**拒绝加载**并在日志写明需要哪个版本，不会静默跳过。
+- `ptlApi`：插件规则 API 版本。当前接受 `1` / `2`（`2` 启用 schema v2 原语）；不匹配时**拒绝加载**并在日志写明需要哪个版本，不会静默跳过。
 - `pair`：`[较旧协议号, 较新协议号]`。
 - `serverVersions`：该规则对适用的服务端版本（仅供人读与文档核对，不参与路由）。
 
@@ -96,19 +96,25 @@ int         jercpld_ptl_self_check(void);           // 0 = OK
 | type | 字段 | 语义 |
 | --- | --- | --- |
 | `appendBytes` | `addedIn`, `bytes`(hex) | 尾部追加；反向校验后删除 |
-| `insertField` | `addedIn`, `skip`(程序), `bytes` | 游标处插入；反向校验后删除 |
+| `insertField` | `addedIn`, `skip`(程序), `bytes` | 游标处插入；反向校验后删除（对称规则） |
+| `insertConst` | `skip`(程序), `bytes` | 游标处无条件插入常量（单向规则） |
+| `deleteField` | `skip`(程序), `field` | 游标处删除一个指定类型的字段 |
+| `stripTrailing` | `field`, `range` | 包尾回扫一个值并删除；`range` 越界即失败 |
+| `arrayTransform` | `count`, `element`, `requireEnd` | 长度前缀数组按元素 read/drop/emit 重编码 |
 | `enumRemap` | `skip`, `map` | 游标处 1 字节查表替换（只影响命中的值） |
 | `zeroFixed` | `skip`, `zeros` | 游标处连续 N 字节清零 |
 | `builtin` | `name` | 引用引擎内置的结构性重写 |
+
+> schema v2 的完整说明见 [PTL_RULE_SCHEMA_V2.md](PTL_RULE_SCHEMA_V2.md)。
 
 ### 游标程序（`skip`）
 
 按顺序把游标从包载荷起点移动到目标字段，全程做越界检查：
 
-`var`、`u8`、`u16`、`i32`、`lf32`、`str`、`nbt`、`optionalVar`、`skip:N`、`marker:<text>`
+`var`、`u8`、`u16`、`i32`、`lf32`、`str`、`nbt`、`optionalVar`、`skip:N`、`marker:<text>`、`markerAny:<a>|<b>`
 
 `marker:<text>` 用于定位带长度前缀的字符串（如 StartGame 的 `multiplayer_correlation_id`），
-引擎找到文本后按前置长度字节跳到字符串末尾，再继续后续 token。
+引擎找到文本后按前置长度字节跳到字符串末尾，再继续后续 token；`markerAny` 依次尝试多个 needle。
 
 ## 引擎内置能力（builtin）
 
@@ -116,12 +122,14 @@ int         jercpld_ptl_self_check(void);           // 0 = OK
 
 | name | 说明 | 反向是否实现 |
 | --- | --- | --- |
-| `start_game_editor_checksum` | StartGame 中间插入/删除 `editor_level_migration_version`，并把 `block_pallette_checksum` 清 0 | 已实现 |
 | `add_player_passenger` | AddPlayer 在 `device_id` 前插入 `passenger_of_block` | 未实现（需 2225 抓包） |
 | `level_chunk_skeleton` | LevelChunk 切换 skeleton 模式 / 删除尾部 `client_biome_update` | 已实现 |
 | `player_list_fab` | PlayerList 的 `play_fab_id` 迁移 | 未实现（需 2225 抓包） |
 | `client_cache_force_off` | c2s `client_cache_status` 强制 false | 不需要 |
 | `camera_presets_strip` | 为 2169 及更老客户端裁掉 CameraPresets 尾部字段（非主线，示例用途） | 不需要 |
+
+> 2026-11-14：`start_game`、`boss_event`、`move_entity_delta`、`dimension_data` 的包级特例
+> 已迁入规则（schema v2），引擎不再保留对应函数与 builtin 名字。
 
 ## 链式路由
 

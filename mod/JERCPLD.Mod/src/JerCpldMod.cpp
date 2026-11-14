@@ -849,64 +849,6 @@ bool insertAddPlayerPassengerField(std::string& data) {
     return true;
 }
 
-// StartGame 的 editor_level_migration_version(u8) 位于第 18 个字段，
-// 需要跳过前 17 个字段后在中间插入，不能追加到包尾。
-struct PacketReader {
-    std::string const& data;
-    size_t             pos;
-
-    bool skip(size_t n) {
-        if (pos + n > data.size()) return false;
-        pos += n;
-        return true;
-    }
-    bool var() {
-        int shift = 0;
-        while (pos < data.size() && shift <= 63) {
-            uint8_t b = static_cast<uint8_t>(data[pos++]);
-            if ((b & 0x80) == 0) return true;
-            shift += 7;
-        }
-        return false;
-    }
-    bool str() {
-        size_t   p   = pos;
-        uint32_t len = readVarUInt(data, p);
-        if (len > data.size() - p) return false;
-        pos = p + len;
-        return true;
-    }
-};
-
-bool insertStartGameEditorField(std::string& data, size_t payloadOffset) {
-    PacketReader r{data, payloadOffset};
-    if (!r.var()) return false;  // entity_id
-    if (!r.var()) return false;  // runtime_entity_id
-    if (!r.var()) return false;  // player_gamemode
-    if (!r.skip(12)) return false; // player_position
-    if (!r.skip(8)) return false;  // rotation
-    if (!r.skip(8)) return false;  // seed
-    if (!r.skip(2)) return false;  // biome_type
-    if (!r.str()) return false;    // biome_name
-    if (!r.var()) return false;    // dimension
-    if (!r.var()) return false;    // generator
-    if (!r.var()) return false;    // world_gamemode
-    if (!r.skip(1)) return false;  // hardcore
-    if (!r.var()) return false;    // difficulty
-    if (!r.var()) return false;    // spawn_position x
-    if (!r.var()) return false;    // spawn_position y
-    if (!r.var()) return false;    // spawn_position z
-    if (!r.skip(1)) return false;  // achievements_disabled
-    if (!r.var()) return false;    // editor_world_type
-    if (!r.skip(2)) return false;  // created_in_editor + exported_from_editor
-    data.insert(r.pos, 1, '\0');
-    return true;
-}
-
-// 2225 PlayerList：
-//   - 记录级在 xbox_user_id 之后新增 play_fab_id(string)
-//   - Skin 内部删除了原有的 play_fab_id(string)
-// 两者必须同时迁移，否则 2225 客户端会把 skin 字节读成 build_platform 枚举。
 struct PacketCursor {
     std::string const& data;
     size_t             pos;
@@ -1064,30 +1006,6 @@ bool skipNbtPayload(PacketCursor& c, uint8_t type) {
     }
     default: return false;
     }
-}
-
-// 2225 客户端会用自身方块表重算 block_pallette_checksum；2193 服务端算出的
-// 值必然不同（且本服有 1295 条自定义方块），客户端会以 -63 block_mismatch
-// 拒绝进入。PocketMine 文档明确：该字段填 0 即可让客户端跳过调色板校验。
-bool zeroBlockPaletteChecksum(std::string& data) {
-    size_t marker = data.rfind("<nethernet>");
-    if (marker == std::string::npos) marker = data.rfind("<raknet>");
-    if (marker == std::string::npos || marker == 0) return false;
-
-    // correlation id 长度前缀（LeviLamina 生成的值 < 128 字节）
-    uint8_t lengthByte = static_cast<uint8_t>(data[marker - 1]);
-    if ((lengthByte & 0x80) != 0) return false;
-    size_t strEnd = marker + lengthByte;
-    if (strEnd > data.size()) return false;
-
-    PacketCursor cursor{data, strEnd};
-    cursor.skip(1); // server_authoritative_inventory
-    size_t begin = 0, end = 0;
-    if (!cursor.str(begin, end)) return false; // engine
-    if (!skipNetworkNbt(cursor)) return false;  // property_data
-    if (cursor.pos + 8 > data.size()) return false;
-    for (size_t i = 0; i < 8; ++i) data[cursor.pos + i] = '\0';
-    return true;
 }
 
 // 2225 的 animate 在末尾多一个 hand(u8)。2193 服务端读到多余字节会判定
@@ -1686,8 +1604,7 @@ bool skipBlockProperties(PacketCursor& c) {
 
 // 2193 -> 1001/2168-: 重编码 GameRule 里 int32 值（li32 固定 4 字节 -> varint LEB128），
 // 并在 server_controlled_sound 之后、has_server_join_info 之前插入 is_chat_logging(bool)。
-// 插入位置依据 minecraft-data 1.26.30（1001 解析基准）与 zeroBlockPaletteChecksum 的
-// 尾段解析交叉一致；注意 is_chat_logging 不在 Commands Enabled 附近。
+// 插入位置依据 minecraft-data 1.26.30（1001 解析基准）与 StartGame 尾段解析交叉一致；注意 is_chat_logging 不在 Commands Enabled 附近。
 // 实际改动仅限 peer < 2168（即只有 1001 需要）。
 bool rewriteStartGameForOldClients(std::string& data, size_t payloadOffset, int peerProtocol) {
     // 2168 及以上已和 2193 结构一致，无需改写
@@ -2120,58 +2037,6 @@ void translateOutboundPacket(std::string& data, int peerProtocol) {
         }
         }
     }
-    if (peerProtocol != 2225) return; // 其余 s2c 结构改写仅 2225 需要
-    switch (packetId) {
-    case 11: // StartGame: editor 字段中间插入 + checksum 清 0
-        if (insertStartGameEditorField(data, offset)) {
-            bool checksumZeroed = zeroBlockPaletteChecksum(data);
-            hookLog(
-                "[JERCPLD] outbound insert field: packet=11 newLen={} checksumZero={}",
-                data.size(),
-                checksumZeroed
-            );
-        } else {
-            hookLog("[JERCPLD] outbound insert failed: packet=11 len={}", data.size());
-        }
-        break;
-    case 12: // AddPlayer: passenger_of_block 在 device_id 之前
-        if (insertAddPlayerPassengerField(data)) {
-            hookLog("[JERCPLD] outbound insert field: packet=12 newLen={}", data.size());
-        } else {
-            size_t start = data.size() > 80 ? data.size() - 80 : 0;
-            hookLog(
-                "[JERCPLD] outbound insert failed: packet=12 len={} tail={}",
-                data.size(),
-                toHex(data.substr(start))
-            );
-        }
-        break;
-    case 44: // Animate: 2225 末尾新增 hand(u8)
-    case 13: // AddActor: 2225 末尾新增 passenger_of_block(option)
-        data.push_back('\0');
-        hookLog("[JERCPLD] outbound append field: packet={} newLen={}", packetId, data.size());
-        break;
-    case 58: { // LevelChunk: skeleton 标记 + 末尾 IsClientBiomeUpdate(bool)
-        if (promoteLevelChunkToSkeleton(data, offset)) {
-            hookLog("[JERCPLD] outbound chunk skeleton: newLen={}", data.size());
-        } else {
-            data.push_back('\0');
-        }
-        break;
-    }
-    case 63: { // PlayerList: 记录级新增 play_fab_id，Skin 删除 play_fab_id
-        std::string original = data;
-        if (translatePlayerList(data, offset)) {
-            hookLog("[JERCPLD] outbound player_list rewritten: {} -> {}", original.size(), data.size());
-        } else {
-            data = std::move(original);
-            hookLog("[JERCPLD] outbound player_list rewrite failed: len={}", data.size());
-        }
-        break;
-    }
-    default:
-        break;
-    }
 }
 
 // ============================================================================
@@ -2179,50 +2044,6 @@ void translateOutboundPacket(std::string& data, int peerProtocol) {
 // 本机没有 26.60 的 LeviLamina，反向链路尚未与真实 2225 服务端跑通，
 // 仅对 2193 抓包做「正向变换后反向还原」的往返验证。未验证项显式标记 TODO。
 // ============================================================================
-
-// StartGame：删除 2225 中间字段 editor_level_migration_version(u8)。
-bool removeStartGameEditorField(std::string& data, size_t payloadOffset) {
-    PacketReader r{data, payloadOffset};
-    if (!r.var()) return false;     // entity_id
-    if (!r.var()) return false;     // runtime_entity_id
-    if (!r.var()) return false;     // player_gamemode
-    if (!r.skip(12)) return false;  // player_position
-    if (!r.skip(8)) return false;   // rotation
-    if (!r.skip(8)) return false;   // seed
-    if (!r.skip(2)) return false;   // biome_type
-    if (!r.str()) return false;     // biome_name
-    if (!r.var()) return false;     // dimension
-    if (!r.var()) return false;     // generator
-    if (!r.var()) return false;     // world_gamemode
-    if (!r.skip(1)) return false;   // hardcore
-    if (!r.var()) return false;     // difficulty
-    if (!r.var()) return false;     // spawn x
-    if (!r.var()) return false;     // spawn y
-    if (!r.var()) return false;     // spawn z
-    if (!r.skip(1)) return false;   // achievements_disabled
-    if (!r.var()) return false;     // editor_world_type
-    if (!r.skip(2)) return false;   // created_in_editor + exported_from_editor
-    if (r.pos >= data.size()) return false;
-    data.erase(r.pos, 1);
-    return true;
-}
-
-// Animate：删除 2225 末尾 hand(u8)。
-bool removeAnimateHandField(std::string& data, size_t payloadOffset) {
-    PacketCursor c{data, payloadOffset};
-    c.u8();         // action_id
-    c.var();        // runtime_entity_id
-    c.skip(4);      // data
-    uint8_t hasSwing = c.u8();
-    if (!c.ok) return false;
-    if (hasSwing == 1) {
-        size_t b = 0, e = 0;
-        if (!c.str(b, e)) return false;
-    }
-    if (c.pos + 1 != data.size()) return false;
-    data.pop_back();
-    return true;
-}
 
 // LevelChunk：删除 2225 末尾 client_biome_update(bool)。
 // 注意 cache_metadata 的数组长度字段无论 cache_enabled 与否都存在。
@@ -2250,68 +2071,6 @@ bool removeLevelChunkTrailingBool(std::string& data, size_t payloadOffset) {
     return true;
 }
 
-// 反向未实现项：AddPlayer(12) 的 passenger_of_block、AddActor(13) 尾字段、
-// PlayerList(63) 的 play_fab_id 回填。需 2225 真实抓包后再写，避免盲改。
-void warnReverseTodoOnce(int packetId) {
-    static std::atomic<unsigned> seen{0};
-    unsigned bit = 1u << (packetId & 7u);
-    if (seen.fetch_or(bit, std::memory_order_relaxed) & bit) return;
-    hookLog("[JERCPLD] reverse TODO: packet={} 镜像改写未实现（需 2225 服务端抓包）", packetId);
-}
-
-void translateOutbound2225To2193(std::string& data) {
-    size_t   offset   = 0;
-    uint32_t packetId = readVarUInt(data, offset);
-    switch (packetId) {
-    case 11: { // StartGame
-        std::string original = data;
-        if (removeStartGameEditorField(data, offset) && zeroBlockPaletteChecksum(data)) {
-            hookLog("[JERCPLD] reverse start_game: editor removed, checksum zeroed, len={}", data.size());
-        } else {
-            data = std::move(original);
-            hookLog("[JERCPLD] reverse start_game rewrite failed: len={}", data.size());
-        }
-        break;
-    }
-    case 44: // Animate
-        removeAnimateHandField(data, offset);
-        break;
-    case 58: // LevelChunk
-        if (!removeLevelChunkTrailingBool(data, offset)) {
-            hookLog("[JERCPLD] reverse level_chunk trailing bool not removed: len={}", data.size());
-        }
-        break;
-    case 12:
-    case 13:
-    case 63:
-        warnReverseTodoOnce(static_cast<int>(packetId));
-        break;
-    default:
-        break;
-    }
-}
-
-// 2193 客户端 -> 2225 服务端：animate 需要补 hand(u8)。枚举实测一致，只补字节。
-// 标记待实测：真实 2225 服务端未验证。
-void addAnimateHandFor2225Server(std::string& data) {
-    size_t   offset   = 0;
-    uint32_t packetId = readVarUInt(data, offset);
-    if (packetId != 44) return;
-    PacketCursor c{data, offset};
-    c.u8();    // action_id
-    c.var();   // runtime_entity_id
-    c.skip(4); // data
-    uint8_t hasSwing = c.u8();
-    if (!c.ok) return;
-    if (hasSwing == 1) {
-        size_t b = 0, e = 0;
-        if (!c.str(b, e)) return;
-    }
-    if (c.pos != data.size()) return;
-    data.push_back('\0'); // hand = main_hand
-    hookLog("[JERCPLD] reverse c2s animate hand appended: newLen={}", data.size());
-}
-
 // 26.45（2169）与 26.4x（2168）已由 PTL 的 2168-2169 / 2169-2193 规则覆盖，
 // 客户端走 NetherNet 直连即可进服（见 README「已完成」）。
 // 仍受限的是「仅 RakNet」的旧客户端：nethernet 下 getRakPeer() 返回 null、
@@ -2325,6 +2084,46 @@ void addAnimateHandFor2225Server(std::string& data) {
 // 结构性重写（需重新编码整包）以 builtin 形式引用引擎内置实现。
 // ============================================================================
 
+// schema v2：通用值 / 表达式 / 元素操作。引擎只解释这些原语，不认识包号。
+struct PtlValue {
+    bool        isBytes = false;
+    int64_t     num     = 0;
+    std::string bytes;
+};
+
+struct PtlExprToken {
+    enum class Kind { Num, Var, Op };
+    Kind        kind = Kind::Num;
+    int64_t     num  = 0;
+    std::string var;
+    char        op   = 0;
+};
+
+struct PtlWhen {
+    std::vector<std::string> skip;
+    std::string              field;
+    std::string              op;   // eq / ne / in / min / max
+    int64_t                  value = 0;
+    std::vector<int64_t>     values;
+};
+
+struct PtlOp {
+    std::string                              kind;      // read / drop / emit
+    std::string                              name;      // read 绑定的变量名
+    std::string                              fieldType; // var/u8/.../fixed:N/remaining
+    bool                                     hasExpr  = false;
+    std::vector<PtlExprToken>                expr;
+    bool                                     hasRef   = false;
+    std::string                              refName;
+    bool                                     hasConst = false;
+    int64_t                                  constNum = 0;
+    bool                                     hasConstBytes = false;
+    std::string                              constBytes;
+    bool                                     hasMap   = false;
+    std::string                              mapDefault;
+    std::unordered_map<int64_t, std::string> map;
+};
+
 struct PtlRule {
     std::string                 type;    // appendBytes / insertField / enumRemap / zeroFixed / builtin
     int                         addedIn = 0;
@@ -2333,6 +2132,16 @@ struct PtlRule {
     int                         zeros = 0;
     std::string                 builtin;
     std::unordered_map<int,int> remap;
+    // schema v2
+    bool                        hasWhen = false;
+    PtlWhen                     when;
+    std::string                 fieldType;  // deleteField / stripTrailing
+    bool                        hasRange = false;
+    int64_t                     rangeMin = 0;
+    int64_t                     rangeMax = 0;
+    std::string                 countType;  // arrayTransform
+    std::vector<PtlOp>          element;
+    bool                        requireEnd = false;
 };
 
 struct PtlPacketRules {
@@ -2656,6 +2465,29 @@ bool ptlRunSkip(std::string const& data, size_t& pos, std::vector<std::string> c
             long n = std::strtol(token.c_str() + 5, nullptr, 10);
             if (n < 0 || static_cast<size_t>(n) > data.size() - pos) return false;
             pos += static_cast<size_t>(n);
+        } else if (token.rfind("markerAny:", 0) == 0) {
+            // markerAny:<a>|<b>：按顺序尝试多个 needle，命中后按前置长度字节跳到字符串结束。
+            std::string needles = token.substr(10);
+            bool        matched = false;
+            for (;;) {
+                size_t      sep    = needles.find('|');
+                std::string needle = needles.substr(0, sep);
+                size_t      found  = needle.empty() ? std::string::npos : data.find(needle, pos);
+                if (found != std::string::npos && found != 0) {
+                    uint8_t lenByte = static_cast<uint8_t>(data[found - 1]);
+                    if ((lenByte & 0x80) == 0) {
+                        size_t end = found + lenByte;
+                        if (end <= data.size()) {
+                            pos     = end;
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+                if (sep == std::string::npos) break;
+                needles = needles.substr(sep + 1);
+            }
+            if (!matched) return false;
         } else if (token.rfind("marker:", 0) == 0) {
             // marker:<text>：定位到该文本起点，再按「前置长度字节」跳到字符串结束。
             std::string needle = token.substr(7);
@@ -2708,18 +2540,6 @@ void ptlAppendString(std::string& out, std::string const& value) {
     out.append(value);
 }
 
-bool ptlReadZigZag32(std::string const& data, size_t& pos, int32_t& value) {
-    uint32_t raw = 0;
-    if (!ptlReadVarUInt(data, pos, raw)) return false;
-    value = static_cast<int32_t>((raw >> 1) ^ static_cast<uint32_t>(-static_cast<int32_t>(raw & 1)));
-    return true;
-}
-
-void ptlAppendZigZag32(std::string& out, int32_t value) {
-    uint32_t raw = (static_cast<uint32_t>(value) << 1) ^ static_cast<uint32_t>(value >> 31);
-    ptlAppendVarUInt(out, raw);
-}
-
 // 读取 varint（最多 10 字节），只推进位置；用于 zigzag64/varint64 字段。
 bool ptlSkipVarint(std::string const& data, size_t& pos) {
     for (int i = 0; i < 10; ++i) {
@@ -2728,25 +2548,6 @@ bool ptlSkipVarint(std::string const& data, size_t& pos) {
         if ((byte & 0x80) == 0) return true;
     }
     return false;
-}
-
-// boss_event：2169（1.26.45）在 target_entity_id 之后无条件带 player_id(zigzag64)，
-// 2193（1.26.51）没有该字段。方向必须与版本一致：
-//   2169 -> 2193 删除 player_id；2193 -> 2169 插入 0（无归属）。
-bool bossEventTo2193(std::string& data, size_t payloadOffset) {
-    size_t pos = payloadOffset;
-    if (!ptlSkipVarint(data, pos)) return false; // target_entity_id
-    size_t start = pos;
-    if (!ptlSkipVarint(data, pos)) return false; // player_id
-    data.erase(start, pos - start);
-    return true;
-}
-
-bool bossEventTo2169(std::string& data, size_t payloadOffset) {
-    size_t pos = payloadOffset;
-    if (!ptlSkipVarint(data, pos)) return false; // target_entity_id
-    data.insert(pos, 1, '\0');                   // player_id = 0
-    return true;
 }
 
 // play_sound：2193 在 loop_count 后新增 bypass_listener_range_check(bool)，
@@ -3476,97 +3277,399 @@ bool packSettingChangeGuard(std::string& data, size_t payloadOffset) {
     return type <= 2;
 }
 
-// move_entity_delta 的尾部 ticks(varint64)：从末尾回扫一个 varint 并删除。
-bool stripTrailingVarint(std::string& data, size_t payloadOffset) {
-    if (data.size() <= payloadOffset) return false;
+// ============================================================================
+// PTL schema v2 通用原语：类型化字段读写、表达式、条件、尾部裁剪、数组变换。
+// 这里不出现任何包号/版本判断，包级语义全部由 JSON 规则表达。
+// ============================================================================
+
+bool ptlFieldTypeValid(std::string const& type) {
+    if (type == "var" || type == "u8" || type == "u16" || type == "i32" || type == "lf32"
+        || type == "zigzag" || type == "str" || type == "nbt" || type == "optionalVar") {
+        return true;
+    }
+    if (type.rfind("fixed:", 0) == 0) {
+        long n = std::strtol(type.c_str() + 6, nullptr, 10);
+        return n > 0 && n <= 4096;
+    }
+    return false;
+}
+
+bool ptlReadField(std::string const& data, size_t& pos, std::string const& type, PtlValue& out) {
+    out = PtlValue{};
+    if (type == "var") {
+        uint64_t value = 0;
+        int      shift = 0;
+        for (;;) {
+            if (pos >= data.size() || shift > 63) return false;
+            uint8_t byte = static_cast<uint8_t>(data[pos++]);
+            value |= static_cast<uint64_t>(byte & 0x7F) << shift;
+            if ((byte & 0x80) == 0) break;
+            shift += 7;
+        }
+        out.num = static_cast<int64_t>(value);
+        return true;
+    }
+    if (type == "u8") {
+        if (pos + 1 > data.size()) return false;
+        out.num = static_cast<uint8_t>(data[pos++]);
+        return true;
+    }
+    if (type == "u16") {
+        if (pos + 2 > data.size()) return false;
+        out.num = static_cast<int64_t>(
+            static_cast<uint16_t>(static_cast<uint8_t>(data[pos]))
+            | static_cast<uint16_t>(static_cast<uint16_t>(static_cast<uint8_t>(data[pos + 1])) << 8)
+        );
+        pos += 2;
+        return true;
+    }
+    if (type == "i32" || type == "lf32") {
+        if (pos + 4 > data.size()) return false;
+        uint32_t raw = static_cast<uint32_t>(static_cast<uint8_t>(data[pos]))
+                     | (static_cast<uint32_t>(static_cast<uint8_t>(data[pos + 1])) << 8)
+                     | (static_cast<uint32_t>(static_cast<uint8_t>(data[pos + 2])) << 16)
+                     | (static_cast<uint32_t>(static_cast<uint8_t>(data[pos + 3])) << 24);
+        out.bytes   = data.substr(pos, 4);
+        out.isBytes = true;
+        out.num     = static_cast<int64_t>(static_cast<int32_t>(raw));
+        pos += 4;
+        return true;
+    }
+    if (type == "zigzag") {
+        uint32_t raw = 0;
+        if (!ptlReadVarUInt(data, pos, raw)) return false;
+        out.num = static_cast<int32_t>((raw >> 1) ^ (0u - (raw & 1u)));
+        return true;
+    }
+    if (type == "str") {
+        uint32_t len = 0;
+        if (!ptlReadVarUInt(data, pos, len)) return false;
+        if (len > data.size() - pos) return false;
+        out.bytes   = data.substr(pos, len);
+        out.isBytes = true;
+        pos += len;
+        return true;
+    }
+    if (type == "nbt") {
+        PacketCursor cursor{data, pos};
+        if (!skipNetworkNbt(cursor)) return false;
+        pos = cursor.pos;
+        return true;
+    }
+    if (type == "optionalVar") {
+        if (pos >= data.size()) return false;
+        uint8_t flag = static_cast<uint8_t>(data[pos++]);
+        if (flag == 1) {
+            uint64_t value = 0;
+            int      shift = 0;
+            for (;;) {
+                if (pos >= data.size() || shift > 63) return false;
+                uint8_t byte = static_cast<uint8_t>(data[pos++]);
+                value |= static_cast<uint64_t>(byte & 0x7F) << shift;
+                if ((byte & 0x80) == 0) break;
+                shift += 7;
+            }
+            out.num = static_cast<int64_t>(value);
+        } else if (flag != 0) {
+            return false;
+        }
+        return true;
+    }
+    if (type.rfind("fixed:", 0) == 0) {
+        long n = std::strtol(type.c_str() + 6, nullptr, 10);
+        if (n <= 0) return false;
+        if (static_cast<size_t>(n) > data.size() - pos) return false;
+        out.bytes   = data.substr(pos, static_cast<size_t>(n));
+        out.isBytes = true;
+        pos += static_cast<size_t>(n);
+        return true;
+    }
+    return false;
+}
+
+bool ptlEmitField(std::string& out, std::string const& type, PtlValue const& value) {
+    if (type == "var" || type == "zigzag") {
+        uint64_t raw = 0;
+        if (type == "zigzag") {
+            int32_t v = static_cast<int32_t>(value.num);
+            raw       = (static_cast<uint32_t>(v) << 1) ^ static_cast<uint32_t>(v >> 31);
+        } else {
+            raw = static_cast<uint64_t>(value.num);
+        }
+        for (;;) {
+            uint8_t byte = static_cast<uint8_t>(raw & 0x7F);
+            raw >>= 7;
+            if (raw != 0) byte |= 0x80;
+            out.push_back(static_cast<char>(byte));
+            if (raw == 0) break;
+        }
+        return true;
+    }
+    if (type == "u8") {
+        out.push_back(static_cast<char>(value.num & 0xFF));
+        return true;
+    }
+    if (type == "u16") {
+        out.push_back(static_cast<char>(value.num & 0xFF));
+        out.push_back(static_cast<char>((value.num >> 8) & 0xFF));
+        return true;
+    }
+    if (type == "i32" || type == "lf32") {
+        if (value.isBytes && value.bytes.size() == 4) {
+            out += value.bytes;
+            return true;
+        }
+        uint32_t raw = static_cast<uint32_t>(static_cast<int32_t>(value.num));
+        for (int i = 0; i < 4; ++i) out.push_back(static_cast<char>((raw >> (i * 8)) & 0xFF));
+        return true;
+    }
+    if (type == "str" || type == "bytes" || type.rfind("fixed:", 0) == 0) {
+        if (!value.isBytes) return false;
+        if (type == "str") {
+            ptlAppendVarUInt(out, static_cast<uint32_t>(value.bytes.size()));
+        } else if (type.rfind("fixed:", 0) == 0) {
+            long n = std::strtol(type.c_str() + 6, nullptr, 10);
+            if (n <= 0 || value.bytes.size() != static_cast<size_t>(n)) return false;
+        }
+        out += value.bytes;
+        return true;
+    }
+    return false;
+}
+
+bool ptlParseExpr(std::string const& text, std::vector<PtlExprToken>& rpn, std::string& error) {
+    std::vector<char> ops;
+    size_t            i            = 0;
+    bool              expectValue  = true;
+    while (i < text.size()) {
+        char c = text[i];
+        if (c == ' ' || c == '\t') {
+            ++i;
+            continue;
+        }
+        if (c == '(') {
+            ops.push_back(c);
+            ++i;
+            expectValue = true;
+            continue;
+        }
+        if (c == ')') {
+            while (!ops.empty() && ops.back() != '(') {
+                rpn.push_back(PtlExprToken{PtlExprToken::Kind::Op, 0, {}, ops.back()});
+                ops.pop_back();
+            }
+            if (ops.empty()) {
+                error = "unbalanced )";
+                return false;
+            }
+            ops.pop_back();
+            ++i;
+            expectValue = false;
+            continue;
+        }
+        if (c == '+' || c == '-' || c == '*' || c == '/') {
+            if (expectValue) {
+                error = "unexpected operator";
+                return false;
+            }
+            int prec = (c == '*' || c == '/') ? 2 : 1;
+            while (!ops.empty() && ops.back() != '(') {
+                char top     = ops.back();
+                int  topPrec = (top == '*' || top == '/') ? 2 : 1;
+                if (topPrec < prec) break;
+                rpn.push_back(PtlExprToken{PtlExprToken::Kind::Op, 0, {}, top});
+                ops.pop_back();
+            }
+            ops.push_back(c);
+            ++i;
+            expectValue = true;
+            continue;
+        }
+        if (c >= '0' && c <= '9') {
+            int64_t value = 0;
+            while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
+                value = value * 10 + (text[i] - '0');
+                ++i;
+            }
+            rpn.push_back(PtlExprToken{PtlExprToken::Kind::Num, value, {}, 0});
+            expectValue = false;
+            continue;
+        }
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+            size_t start = i;
+            while (i < text.size()
+                   && ((text[i] >= 'a' && text[i] <= 'z') || (text[i] >= 'A' && text[i] <= 'Z')
+                       || (text[i] >= '0' && text[i] <= '9') || text[i] == '_')) {
+                ++i;
+            }
+            rpn.push_back(PtlExprToken{PtlExprToken::Kind::Var, 0, text.substr(start, i - start), 0});
+            expectValue = false;
+            continue;
+        }
+        error = fmt::format("unexpected char '{}'", c);
+        return false;
+    }
+    if (expectValue) {
+        error = "expression ends with operator";
+        return false;
+    }
+    while (!ops.empty()) {
+        if (ops.back() == '(') {
+            error = "unbalanced (";
+            return false;
+        }
+        rpn.push_back(PtlExprToken{PtlExprToken::Kind::Op, 0, {}, ops.back()});
+        ops.pop_back();
+    }
+    return !rpn.empty();
+}
+
+bool ptlEvalExpr(
+    std::vector<PtlExprToken> const&                rpn,
+    std::unordered_map<std::string, PtlValue> const& vars,
+    int64_t&                                        result
+) {
+    std::vector<int64_t> stack;
+    for (auto const& token : rpn) {
+        if (token.kind == PtlExprToken::Kind::Num) {
+            stack.push_back(token.num);
+        } else if (token.kind == PtlExprToken::Kind::Var) {
+            auto it = vars.find(token.var);
+            if (it == vars.end() || it->second.isBytes) return false;
+            stack.push_back(it->second.num);
+        } else {
+            if (stack.size() < 2) return false;
+            int64_t b = stack.back();
+            stack.pop_back();
+            int64_t a = stack.back();
+            stack.pop_back();
+            int64_t value = 0;
+            switch (token.op) {
+            case '+': value = a + b; break;
+            case '-': value = a - b; break;
+            case '*': value = a * b; break;
+            case '/':
+                if (b == 0) return false;
+                value = a / b;
+                break;
+            default: return false;
+            }
+            stack.push_back(value);
+        }
+    }
+    if (stack.size() != 1) return false;
+    result = stack.back();
+    return true;
+}
+
+enum class PtlGuard { Match, NoMatch, Error };
+
+PtlGuard ptlEvalWhen(std::string const& data, size_t payloadOffset, PtlWhen const& when) {
+    size_t pos = payloadOffset;
+    if (!ptlRunSkip(data, pos, when.skip)) return PtlGuard::Error;
+    PtlValue value;
+    if (!ptlReadField(data, pos, when.field, value)) return PtlGuard::Error;
+    if (when.op == "eq") return value.num == when.value ? PtlGuard::Match : PtlGuard::NoMatch;
+    if (when.op == "ne") return value.num != when.value ? PtlGuard::Match : PtlGuard::NoMatch;
+    if (when.op == "in") {
+        for (auto candidate : when.values) {
+            if (value.num == candidate) return PtlGuard::Match;
+        }
+        return PtlGuard::NoMatch;
+    }
+    if (when.op == "min") return value.num >= when.value ? PtlGuard::Match : PtlGuard::NoMatch;
+    if (when.op == "max") return value.num <= when.value ? PtlGuard::Match : PtlGuard::NoMatch;
+    return PtlGuard::Error;
+}
+
+bool ptlStripTrailing(
+    std::string&       data,
+    size_t             payloadOffset,
+    std::string const& fieldType,
+    bool               hasRange,
+    int64_t            rangeMin,
+    int64_t            rangeMax
+) {
+    if (fieldType != "var") return false;
     size_t end = data.size();
+    if (end <= payloadOffset) return false;
     if ((static_cast<uint8_t>(data[end - 1]) & 0x80) != 0) return false;
     size_t start = end - 1;
-    while (start > payloadOffset && (static_cast<uint8_t>(data[start - 1]) & 0x80) != 0) {
-        --start;
-    }
+    while (start > payloadOffset && (static_cast<uint8_t>(data[start - 1]) & 0x80) != 0) --start;
     if (start <= payloadOffset) return false;
+    uint64_t value = 0;
+    int      shift = 0;
+    for (size_t i = start; i < end; ++i) {
+        uint8_t byte = static_cast<uint8_t>(data[i]);
+        if (shift > 63) return false;
+        value |= static_cast<uint64_t>(byte & 0x7F) << shift;
+        shift += 7;
+    }
+    if (hasRange) {
+        int64_t signedValue = static_cast<int64_t>(value);
+        if (signedValue < rangeMin || signedValue > rangeMax) return false;
+    }
     data.erase(start, end - start);
     return true;
 }
 
-// dimension_data：2193(min_y,height_range,...,default_biome) -> 2169(max_height,min_height,...)
-bool dimensionDataTo2169(std::string& data, size_t payloadOffset) {
-    size_t   pos = payloadOffset;
+bool ptlArrayTransform(std::string& data, size_t payloadOffset, PtlRule const& rule) {
+    if (rule.countType != "var") return false;
+    size_t   pos   = payloadOffset;
     uint32_t count = 0;
     if (!ptlReadVarUInt(data, pos, count)) return false;
+    if (count > 4096) return false;
     std::string out = data.substr(0, payloadOffset);
     ptlAppendVarUInt(out, count);
     for (uint32_t i = 0; i < count; ++i) {
-        std::string id;
-        if (!ptlReadString(data, pos, id)) return false;
-        ptlAppendString(out, id);
-        int32_t minY = 0, heightRange = 0, generator = 0, dimensionType = 0;
-        if (!ptlReadZigZag32(data, pos, minY) || !ptlReadZigZag32(data, pos, heightRange)
-            || !ptlReadZigZag32(data, pos, generator) || !ptlReadZigZag32(data, pos, dimensionType))
-            return false;
-        if (pos + 16 > data.size()) return false;
-        std::string packId = data.substr(pos, 16);
-        pos += 16;
-        std::string defaultBiome;
-        if (!ptlReadString(data, pos, defaultBiome)) return false;
-        ptlAppendZigZag32(out, minY + heightRange);
-        ptlAppendZigZag32(out, minY);
-        ptlAppendZigZag32(out, generator);
-        ptlAppendZigZag32(out, dimensionType);
-        out.append(packId);
+        std::unordered_map<std::string, PtlValue> vars;
+        for (auto const& op : rule.element) {
+            if (op.kind == "read") {
+                PtlValue value;
+                if (!ptlReadField(data, pos, op.fieldType, value)) return false;
+                vars[op.name] = std::move(value);
+            } else if (op.kind == "drop") {
+                if (op.fieldType == "remaining") return false;
+                PtlValue value;
+                if (!ptlReadField(data, pos, op.fieldType, value)) return false;
+            } else if (op.kind == "emit") {
+                PtlValue value;
+                if (op.hasExpr) {
+                    if (!ptlEvalExpr(op.expr, vars, value.num)) return false;
+                } else if (op.hasRef) {
+                    auto it = vars.find(op.refName);
+                    if (it == vars.end()) return false;
+                    value = it->second;
+                } else if (op.hasConstBytes) {
+                    value.bytes   = op.constBytes;
+                    value.isBytes = true;
+                } else if (op.hasConst) {
+                    value.num = op.constNum;
+                } else {
+                    return false;
+                }
+                if (op.hasMap) {
+                    auto it       = op.map.find(value.num);
+                    value.bytes   = (it != op.map.end()) ? it->second : op.mapDefault;
+                    value.isBytes = true;
+                }
+                if (!ptlEmitField(out, op.fieldType, value)) return false;
+            } else {
+                return false;
+            }
+        }
     }
-    if (pos != data.size()) return false;
-    data = std::move(out);
-    return true;
-}
-
-// dimension_data：2169(max_height,min_height,...) -> 2193(min_y,height_range,...,default_biome)
-bool dimensionDataTo2193(std::string& data, size_t payloadOffset) {
-    size_t   pos = payloadOffset;
-    uint32_t count = 0;
-    if (!ptlReadVarUInt(data, pos, count)) return false;
-    std::string out = data.substr(0, payloadOffset);
-    ptlAppendVarUInt(out, count);
-    for (uint32_t i = 0; i < count; ++i) {
-        std::string id;
-        if (!ptlReadString(data, pos, id)) return false;
-        ptlAppendString(out, id);
-        int32_t maxHeight = 0, minHeight = 0, generator = 0, dimensionType = 0;
-        if (!ptlReadZigZag32(data, pos, maxHeight) || !ptlReadZigZag32(data, pos, minHeight)
-            || !ptlReadZigZag32(data, pos, generator) || !ptlReadZigZag32(data, pos, dimensionType))
-            return false;
-        if (pos + 16 > data.size()) return false;
-        std::string packId = data.substr(pos, 16);
-        pos += 16;
-        ptlAppendZigZag32(out, minHeight);
-        ptlAppendZigZag32(out, maxHeight - minHeight);
-        ptlAppendZigZag32(out, generator);
-        ptlAppendZigZag32(out, dimensionType);
-        out.append(packId);
-        char const* biome = "minecraft:plains";
-        if (generator == 3) biome = "minecraft:nether_wastes";
-        else if (generator == 4) biome = "minecraft:the_end";
-        else if (generator == 5) biome = "minecraft:the_void";
-        ptlAppendString(out, biome);
+    if (rule.requireEnd) {
+        if (pos != data.size()) return false;
+    } else {
+        out.append(data, pos, std::string::npos);
     }
-    if (pos != data.size()) return false;
     data = std::move(out);
     return true;
 }
 
 // 内置结构性改写：按名字分发，forward 表示「旧 -> 新」。
 bool ptlBuiltin(std::string& data, size_t payloadOffset, std::string const& name, bool olderToNewer) {
-    if (name == "start_game_editor_checksum") {
-        if (olderToNewer) {
-            return insertStartGameEditorField(data, payloadOffset) && zeroBlockPaletteChecksum(data);
-        }
-        return removeStartGameEditorField(data, payloadOffset) && zeroBlockPaletteChecksum(data);
-    }
-    if (name == "start_game_zero_checksum") {
-        // 2168/2169 与 2193 的 StartGame 布局一致，只需清调色板校验值。
-        return zeroBlockPaletteChecksum(data);
-    }
     if (name == "add_player_passenger") {
         if (olderToNewer) return insertAddPlayerPassengerField(data);
         return false; // TODO：反向需 2225 抓包
@@ -3592,14 +3695,6 @@ bool ptlBuiltin(std::string& data, size_t payloadOffset, std::string const& name
     if (name == "camera_presets_strip") {
         if (olderToNewer) return false;
         return stripCameraPresetTrailingFields(data, payloadOffset);
-    }
-    if (name == "boss_event_to_2169") {
-        if (olderToNewer) return false;
-        return bossEventTo2169(data, payloadOffset);
-    }
-    if (name == "boss_event_to_2193") {
-        if (!olderToNewer) return false;
-        return bossEventTo2193(data, payloadOffset);
     }
     if (name == "play_sound_to_2169") {
         if (olderToNewer) return false;
@@ -3633,18 +3728,6 @@ bool ptlBuiltin(std::string& data, size_t payloadOffset, std::string const& name
         if (olderToNewer) return false;
         return subchunkTo2169(data, payloadOffset);
     }
-    if (name == "move_entity_delta_strip_ticks") {
-        if (olderToNewer) return false;
-        return stripTrailingVarint(data, payloadOffset);
-    }
-    if (name == "dimension_data_to_2169") {
-        if (olderToNewer) return false;
-        return dimensionDataTo2169(data, payloadOffset);
-    }
-    if (name == "dimension_data_to_2193") {
-        if (!olderToNewer) return false;
-        return dimensionDataTo2193(data, payloadOffset);
-    }
     return false;
 }
 
@@ -3655,6 +3738,11 @@ bool ptlApplyRules(
     bool                      olderToNewer
 ) {
     for (auto const& rule : rules) {
+        if (rule.hasWhen) {
+            PtlGuard guard = ptlEvalWhen(data, payloadOffset, rule.when);
+            if (guard == PtlGuard::Error) return false;
+            if (guard == PtlGuard::NoMatch) continue;
+        }
         if (rule.type == "appendBytes") {
             if (olderToNewer) {
                 data.append(rule.bytes);
@@ -3687,6 +3775,24 @@ bool ptlApplyRules(
             std::fill_n(data.begin() + static_cast<std::ptrdiff_t>(pos), rule.zeros, '\0');
         } else if (rule.type == "builtin") {
             if (!ptlBuiltin(data, payloadOffset, rule.builtin, olderToNewer)) return false;
+        } else if (rule.type == "insertConst") {
+            size_t pos = payloadOffset;
+            if (!ptlRunSkip(data, pos, rule.skip)) return false;
+            data.insert(pos, rule.bytes);
+        } else if (rule.type == "deleteField") {
+            size_t pos = payloadOffset;
+            if (!ptlRunSkip(data, pos, rule.skip)) return false;
+            size_t start = pos;
+            PtlValue value;
+            if (!ptlReadField(data, pos, rule.fieldType, value)) return false;
+            data.erase(start, pos - start);
+        } else if (rule.type == "stripTrailing") {
+            if (!ptlStripTrailing(
+                    data, payloadOffset, rule.fieldType, rule.hasRange, rule.rangeMin, rule.rangeMax
+                ))
+                return false;
+        } else if (rule.type == "arrayTransform") {
+            if (!ptlArrayTransform(data, payloadOffset, rule)) return false;
         } else {
             return false;
         }
@@ -3697,18 +3803,184 @@ bool ptlApplyRules(
 // builtin 名字写错时必须在加载期报错，否则规则语法合法、静默失效，只在运行期表现为「规则失败」。
 bool isKnownBuiltin(std::string const& name) {
     static constexpr char const* kBuiltins[] = {
-        "start_game_editor_checksum", "start_game_zero_checksum", "add_player_passenger",
-        "level_chunk_skeleton",       "player_list_fab",           "client_cache_force_off",
-        "camera_presets_strip",       "boss_event_to_2169",        "boss_event_to_2193",
-        "play_sound_to_2169",         "play_sound_to_2193",        "pack_setting_change_guard",
-        "transaction_to_2169",        "transaction_to_2193",       "player_auth_input_to_2193",
-        "item_stack_response_to_2169","subchunk_to_2169",          "move_entity_delta_strip_ticks",
-        "dimension_data_to_2169",     "dimension_data_to_2193",
+        "add_player_passenger", "level_chunk_skeleton", "player_list_fab",
+        "client_cache_force_off", "camera_presets_strip", "play_sound_to_2169",
+        "play_sound_to_2193", "pack_setting_change_guard", "transaction_to_2169",
+        "transaction_to_2193", "player_auth_input_to_2193", "item_stack_response_to_2169",
+        "subchunk_to_2169",
     };
     for (auto candidate : kBuiltins) {
         if (name == candidate) return true;
     }
     return false;
+}
+
+bool ptlParseSkipTokens(nlohmann::json const& json, std::vector<std::string>& out, std::string& error) {
+    if (!json.is_array()) {
+        error = "skip must be an array";
+        return false;
+    }
+    for (auto const& token : json) {
+        if (!token.is_string()) {
+            error = "skip token must be a string";
+            return false;
+        }
+        out.push_back(token.get<std::string>());
+    }
+    return true;
+}
+
+bool ptlParseWhen(nlohmann::json const& json, PtlWhen& when, std::string& error) {
+    if (!json.is_object()) {
+        error = "when must be an object";
+        return false;
+    }
+    when.field = json.value("field", std::string{});
+    if (!ptlFieldTypeValid(when.field)) {
+        error = "when.field invalid: " + when.field;
+        return false;
+    }
+    when.op = json.value("op", std::string{"eq"});
+    if (json.contains("skip") && !ptlParseSkipTokens(json["skip"], when.skip, error)) return false;
+    if (when.op == "in") {
+        if (!json.contains("in") || !json["in"].is_array() || json["in"].empty()) {
+            error = "when.in must be a non-empty array";
+            return false;
+        }
+        for (auto const& value : json["in"]) {
+            if (!value.is_number_integer()) {
+                error = "when.in value must be integer";
+                return false;
+            }
+            when.values.push_back(value.get<int64_t>());
+        }
+        return true;
+    }
+    if (when.op == "eq" || when.op == "ne" || when.op == "min" || when.op == "max") {
+        if (!json.contains("value") || !json["value"].is_number_integer()) {
+            error = "when.value must be integer";
+            return false;
+        }
+        when.value = json["value"].get<int64_t>();
+        return true;
+    }
+    error = "unknown when op: " + when.op;
+    return false;
+}
+
+bool ptlParseOps(nlohmann::json const& arr, std::vector<PtlOp>& out, std::string& error) {
+    if (!arr.is_array() || arr.empty()) {
+        error = "element must be a non-empty array";
+        return false;
+    }
+    std::unordered_set<std::string> names;
+    for (auto const& item : arr) {
+        if (!item.is_object()) {
+            error = "element op must be an object";
+            return false;
+        }
+        PtlOp op;
+        op.kind      = item.value("op", std::string{});
+        op.fieldType = item.value("type", std::string{});
+        if (op.kind == "read") {
+            op.name = item.value("name", std::string{});
+            if (op.name.empty()) {
+                error = "read requires name";
+                return false;
+            }
+            if (names.count(op.name) != 0) {
+                error = "duplicate read name: " + op.name;
+                return false;
+            }
+            if (!ptlFieldTypeValid(op.fieldType)) {
+                error = "read invalid type: " + op.fieldType;
+                return false;
+            }
+            names.insert(op.name);
+        } else if (op.kind == "drop") {
+            if (op.fieldType != "remaining" && !ptlFieldTypeValid(op.fieldType)) {
+                error = "drop invalid type: " + op.fieldType;
+                return false;
+            }
+        } else if (op.kind == "emit") {
+            if (op.fieldType != "bytes" && !ptlFieldTypeValid(op.fieldType)) {
+                error = "emit invalid type: " + op.fieldType;
+                return false;
+            }
+            if (item.contains("expr")) {
+                if (!item["expr"].is_string()) {
+                    error = "emit.expr must be a string";
+                    return false;
+                }
+                std::string exprError;
+                if (!ptlParseExpr(item["expr"].get<std::string>(), op.expr, exprError)) {
+                    error = "emit.expr: " + exprError;
+                    return false;
+                }
+                op.hasExpr = true;
+                for (auto const& token : op.expr) {
+                    if (token.kind == PtlExprToken::Kind::Var && names.count(token.var) == 0) {
+                        error = "emit.expr references unknown var: " + token.var;
+                        return false;
+                    }
+                }
+            } else if (item.contains("ref")) {
+                if (!item["ref"].is_string()) {
+                    error = "emit.ref must be a string";
+                    return false;
+                }
+                op.refName = item["ref"].get<std::string>();
+                if (names.count(op.refName) == 0) {
+                    error = "emit.ref references unknown var: " + op.refName;
+                    return false;
+                }
+                op.hasRef = true;
+            } else if (item.contains("const")) {
+                if (item["const"].is_number_integer()) {
+                    op.hasConst = true;
+                    op.constNum = item["const"].get<int64_t>();
+                } else if (item["const"].is_string()) {
+                    op.hasConstBytes = true;
+                    op.constBytes   = item["const"].get<std::string>();
+                } else {
+                    error = "emit.const must be integer or string";
+                    return false;
+                }
+            } else {
+                error = "emit requires expr/ref/const";
+                return false;
+            }
+            if (item.contains("map")) {
+                if (!item["map"].is_object()) {
+                    error = "emit.map must be an object";
+                    return false;
+                }
+                for (auto const& [key, value] : item["map"].items()) {
+                    if (!value.is_string()) {
+                        error = "emit.map value must be a string";
+                        return false;
+                    }
+                    try {
+                        op.map[std::stoll(key)] = value.get<std::string>();
+                    } catch (...) {
+                        error = "emit.map key must be an integer";
+                        return false;
+                    }
+                }
+                if (!item.contains("default")) {
+                    error = "emit.map requires default";
+                    return false;
+                }
+                op.hasMap     = true;
+                op.mapDefault = item.value("default", std::string{});
+            }
+        } else {
+            error = "unknown element op: " + op.kind;
+            return false;
+        }
+        out.push_back(std::move(op));
+    }
+    return true;
 }
 
 bool ptlParseRules(nlohmann::json const& arr, std::vector<PtlRule>& out, std::string& error) {
@@ -3759,6 +4031,28 @@ bool ptlParseRules(nlohmann::json const& arr, std::vector<PtlRule>& out, std::st
                 }
             }
         }
+        if (item.contains("when")) {
+            if (!ptlParseWhen(item["when"], rule.when, error)) return false;
+            rule.hasWhen = true;
+        }
+        rule.fieldType  = item.value("field", std::string{});
+        rule.countType  = item.value("count", std::string{});
+        rule.requireEnd = item.value("requireEnd", false);
+        if (item.contains("range")) {
+            if (!item["range"].is_array() || item["range"].size() != 2
+                || !item["range"][0].is_number_integer() || !item["range"][1].is_number_integer()) {
+                error = "range must be [min, max] integers";
+                return false;
+            }
+            rule.hasRange = true;
+            rule.rangeMin = item["range"][0].get<int64_t>();
+            rule.rangeMax = item["range"][1].get<int64_t>();
+            if (rule.rangeMin > rule.rangeMax) {
+                error = "range min > max";
+                return false;
+            }
+        }
+        if (item.contains("element") && !ptlParseOps(item["element"], rule.element, error)) return false;
         if (rule.type == "builtin" && rule.builtin.empty()) {
             error = "builtin requires name";
             return false;
@@ -3767,9 +4061,30 @@ bool ptlParseRules(nlohmann::json const& arr, std::vector<PtlRule>& out, std::st
             error = "unknown builtin: " + rule.builtin;
             return false;
         }
-        if (rule.type != "builtin" && rule.type != "appendBytes" && rule.type != "insertField"
-            && rule.type != "enumRemap" && rule.type != "zeroFixed" && rule.type != "drop") {
+        bool const knownType =
+            rule.type == "builtin" || rule.type == "appendBytes" || rule.type == "insertField"
+            || rule.type == "enumRemap" || rule.type == "zeroFixed" || rule.type == "drop"
+            || rule.type == "deleteField" || rule.type == "stripTrailing"
+            || rule.type == "arrayTransform" || rule.type == "insertConst";
+        if (!knownType) {
             error = "unknown rule type: " + rule.type;
+            return false;
+        }
+        if (rule.type == "insertConst" && rule.bytes.empty()) {
+            error = "insertConst requires non-empty bytes";
+            return false;
+        }
+        if (rule.type == "deleteField" && !ptlFieldTypeValid(rule.fieldType)) {
+            error = "deleteField requires a valid field type";
+            return false;
+        }
+        if (rule.type == "stripTrailing" && rule.fieldType != "var") {
+            error = "stripTrailing supports field=var only";
+            return false;
+        }
+        if (rule.type == "arrayTransform"
+            && (rule.countType != "var" || rule.element.empty())) {
+            error = "arrayTransform requires count=var and element";
             return false;
         }
         out.push_back(std::move(rule));
@@ -3780,8 +4095,8 @@ bool ptlParseRules(nlohmann::json const& arr, std::vector<PtlRule>& out, std::st
 bool ptlParsePairJson(std::string const& name, nlohmann::json const& json, PtlPair& pair, std::string& error) {
     pair.api  = json.value("ptlApi", 0);
     pair.file = name;
-    if (pair.api != 1) {
-        error = fmt::format("unsupported ptlApi {} (需要 1)", pair.api);
+    if (pair.api != 1 && pair.api != 2) {
+        error = fmt::format("unsupported ptlApi {} (需要 1 或 2)", pair.api);
         return false;
     }
     if (!json.contains("pair") || !json["pair"].is_array() || json["pair"].size() != 2) {
