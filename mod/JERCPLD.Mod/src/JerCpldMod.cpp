@@ -109,7 +109,10 @@ struct Config {
 
 namespace {
 
+// 默认锚点；运行期一律以 config 的 serverProtocol（gServerProtocol）为准。
 constexpr int kServerProtocolValue = 2193;
+// 2193 布局的历史基线：仅用于“结构按 2193 写死”的修补分支判定，不随配置变化。
+constexpr int kLegacy2193Protocol = 2193;
 
 // BDS 1.26.51 的处理器符号（由 ServerNetworkHandler.h 的声明生成）。
 constexpr char const* kLoginHandlerSymbol =
@@ -298,11 +301,12 @@ void loginHandlerDetour(NetEventCallback* self, NetworkIdentifier const& source,
         int  from       = packet->mClientNetworkVersion;
         bool hasRequest = packet->mConnectionRequest != nullptr;
         hookLog("[JERCPLD] login handler hit: protocol={} hasConnectionRequest={}", from, hasRequest);
-        // 任意已登记范围内的非 2193 客户端都改写成服务端协议号。
+        // 任意已登记范围内的非服务端协议客户端都改写成服务端协议号。
         if (needsProtocolRewrite(from) && gTranslationEnabled.load(std::memory_order_relaxed)) {
-            packet->mClientNetworkVersion = kServerProtocolValue;
-            modLog("[JERCPLD] login protocol rewritten: {} -> {}", from, kServerProtocolValue);
-            hookLog("[JERCPLD] login protocol rewritten: {} -> {}", from, kServerProtocolValue);
+            int const target = gServerProtocol.load(std::memory_order_relaxed);
+            packet->mClientNetworkVersion = target;
+            modLog("[JERCPLD] login protocol rewritten: {} -> {}", from, target);
+            hookLog("[JERCPLD] login protocol rewritten: {} -> {}", from, target);
         }
     }
     auto origin = reinterpret_cast<LoginHandlerFn>(gOriginalLoginHandler);
@@ -320,9 +324,10 @@ void requestNetworkSettingsHandlerDetour(
     int   from          = mutablePacket.mClientNetworkVersion;
     hookLog("[JERCPLD] request_network_settings handler hit: protocol={}", from);
     if (needsProtocolRewrite(from) && gTranslationEnabled.load(std::memory_order_relaxed)) {
-        mutablePacket.mClientNetworkVersion = kServerProtocolValue;
-        modLog("[JERCPLD] request_network_settings protocol rewritten: {} -> {}", from, kServerProtocolValue);
-        hookLog("[JERCPLD] request_network_settings protocol rewritten: {} -> {}", from, kServerProtocolValue);
+        int const target = gServerProtocol.load(std::memory_order_relaxed);
+        mutablePacket.mClientNetworkVersion = target;
+        modLog("[JERCPLD] request_network_settings protocol rewritten: {} -> {}", from, target);
+        hookLog("[JERCPLD] request_network_settings protocol rewritten: {} -> {}", from, target);
     }
     auto origin = reinterpret_cast<RequestNetworkSettingsHandlerFn>(gOriginalRequestNetworkSettingsHandler);
     if (origin) {
@@ -755,7 +760,9 @@ NetworkPeer::DataStatus receivePacketDetour(
             if (rawVersion != 0) connectionProtocolWithSlot(self, &connSlot);
             dumpRawC2sPacket(buffer, version, wasLogin);
             int serverProto = gServerProtocol.load(std::memory_order_relaxed);
-            if (serverProto == kServerProtocolValue) {
+            // 2193 基线专属的 c2s 修补：这些改写的对端结构是按 2193 布局写死的，
+            // 只有在服务端协议号确实为 2193 时才能启用，不能跟随 serverProtocol 配置。
+            if (serverProto == kLegacy2193Protocol) {
             // peer<2168 (协议号 < 2168)：只有 ResourcePackClientResponse 的载荷结构变了，包号不变。
             // 1001: response_status=u8, 无 response_status_name, resourcepackids 总是发送(li16 count)
             // 2193: response_status=varint, 有 response_status_name(string), resourcepackids conditional
@@ -786,14 +793,14 @@ NetworkPeer::DataStatus receivePacketDetour(
                 trimAnimateHand(buffer);
             }
             // 2169/2168/1001 的 c2s 走 PTL 链（2225 已有专属处理，避免重复）。
-            if (version != 0 && version != kServerProtocolValue && version != 2225) {
+            if (version != 0 && version != serverProto && version != 2225) {
                 dispatchInboundTranslation(buffer, version, connSlot);
             }
             } else {
-                // 反向链路（2225 服务端 + 2193 客户端）：c2s 镜像补字段。
+                // 反向链路（新服务端 + 老客户端）：全部非服务端协议都走 PTL 链。
                 dispatchInboundTranslation(buffer, version, connSlot);
             }
-            if (rawVersion != 0 && rawVersion != kServerProtocolValue) {
+            if (rawVersion != 0 && rawVersion != serverProto) {
                 registerTranslatedPeer(self, rawVersion);
                 hookLog("[JERCPLD] translated peer registered: protocol={}", rawVersion);
             }
@@ -816,8 +823,8 @@ using EncryptedSendPacketFn = void (*)(
 );
 
 // AddPlayer 的 passenger_of_block 插在 device_id 之前，不是包尾。
-// 通过定位 device_id 字符串（尾部可打印 ASCII + 可选 device_os）来插入 0x00。
-bool insertAddPlayerPassengerField(std::string& data) {
+// 通过定位 device_id 字符串（尾部可打印 ASCII + 可选 device_os）来定位插入点。
+size_t findAddPlayerDeviceIdOffset(std::string const& data) {
     size_t const end  = data.size();
     size_t       best = SIZE_MAX;
     size_t       begin = end > 128 ? end - 128 : 0;
@@ -844,8 +851,24 @@ bool insertAddPlayerPassengerField(std::string& data) {
         }
         if (best == SIZE_MAX || o > best) best = o;
     }
+    return best;
+}
+
+bool insertAddPlayerPassengerField(std::string& data) {
+    size_t best = findAddPlayerDeviceIdOffset(data);
     if (best == SIZE_MAX) return false;
     data.insert(best, 1, '\0');
+    return true;
+}
+
+// 反向（2225 -> 2193）：删掉 device_id 前的 passenger_of_block option 标志。
+// 只接受 absent(0x00)；present 时无法在不完整解析 option 负载的情况下安全回退，
+// 交给上层 fail-closed 丢弃并记日志。
+bool removeAddPlayerPassengerField(std::string& data) {
+    size_t best = findAddPlayerDeviceIdOffset(data);
+    if (best == SIZE_MAX || best == 0) return false;
+    if (static_cast<uint8_t>(data[best - 1]) != 0) return false;
+    data.erase(best - 1, 1);
     return true;
 }
 
@@ -1137,6 +1160,128 @@ bool translatePlayerList(std::string& data, size_t offset) {
     }
     if (cursor.pos != data.size()) out.append(data, cursor.pos, data.size() - cursor.pos);
     data = std::move(out);
+    return true;
+}
+
+// 反向（2225 -> 2193）：record 级 play_fab_id 搬回 Skin 内 skin_id 之后。
+bool translatePlayerListToOlder(std::string& data, size_t offset) {
+    std::string out;
+    out.reserve(data.size() + 64);
+    out.append(data, 0, offset);
+
+    PacketCursor cursor{data, offset};
+    uint64_t     count = cursor.var();
+    if (!cursor.ok || count > 1024) return false;
+    out.append(data, offset, cursor.pos - offset);
+
+    for (uint64_t i = 0; i < count; ++i) {
+        size_t   recordStart = cursor.pos;
+        uint64_t type        = cursor.var();
+        if (!cursor.ok) return false;
+        cursor.skip(1); // legacy_type
+        if (!cursor.ok) return false;
+
+        if (type == 0) { // remove: 仅 uuid
+            cursor.skip(16);
+            if (!cursor.ok) return false;
+            out.append(data, recordStart, cursor.pos - recordStart);
+            continue;
+        }
+        if (type != 1) return false;
+
+        cursor.skip(16); // uuid
+        cursor.var();    // entity_unique_id (zigzag64)
+        if (!cursor.ok) return false;
+
+        size_t begin = 0, end = 0;
+        if (!cursor.str(begin, end)) return false; // username
+        if (!cursor.str(begin, end)) return false; // xbox_user_id
+        size_t xboxEnd = cursor.pos;
+
+        size_t fabBegin = 0, fabEnd = 0;
+        if (!cursor.str(fabBegin, fabEnd)) return false; // 记录级 play_fab_id（2225）
+        size_t fabEndPos = cursor.pos;
+
+        if (!cursor.str(begin, end)) return false; // platform_chat_id
+        cursor.skip(4); // build_platform
+        if (!cursor.ok) return false;
+        size_t skinStart = cursor.pos;
+
+        if (!cursor.str(begin, end)) return false; // skin_id
+        size_t skinIdEnd = cursor.pos;
+
+        if (!cursor.str(begin, end)) return false; // skin_resource_pack
+        if (!cursor.skinImage()) return false;     // skin_data
+        uint64_t animationCount = cursor.var();
+        if (!cursor.ok || animationCount > 1024) return false;
+        for (uint64_t a = 0; a < animationCount; ++a) {
+            if (!cursor.skinImage()) return false;
+            cursor.var();   // animation_type
+            cursor.skip(4); // animation_frames
+            cursor.var();   // expression_type
+            if (!cursor.ok) return false;
+        }
+        if (!cursor.skinImage()) return false; // cape_data
+        if (!cursor.str(begin, end)) return false; // geometry_data
+        if (!cursor.str(begin, end)) return false; // geometry_data_version
+        if (!cursor.str(begin, end)) return false; // animation_data
+        if (!cursor.str(begin, end)) return false; // cape_id
+        if (!cursor.str(begin, end)) return false; // full_skin_id
+        cursor.skip(1); // arm_size
+        cursor.skip(4); // skin_color
+        uint64_t pieceCount = cursor.var();
+        if (!cursor.ok || pieceCount > 4096) return false;
+        for (uint64_t p = 0; p < pieceCount; ++p) {
+            if (!cursor.str(begin, end)) return false; // piece_id
+            cursor.skip(4);  // piece_type
+            cursor.skip(16); // pack_id
+            cursor.skip(1);  // is_default_piece
+            if (!cursor.str(begin, end)) return false; // product_id
+        }
+        uint64_t tintCount = cursor.var();
+        if (!cursor.ok || tintCount > 4096) return false;
+        for (uint64_t t = 0; t < tintCount; ++t) {
+            if (!cursor.str(begin, end)) return false; // piece_type
+            cursor.skip(16); // colors[4]
+        }
+        cursor.skip(5); // premium + persona + cape_on_classic + primary_user + overriding_player_appearance
+        if (!cursor.str(begin, end)) return false; // trusted
+        if (!cursor.str(begin, end)) return false; // profile_hash
+        size_t skinEnd = cursor.pos;
+
+        cursor.skip(7); // is_teacher + is_host + is_subclient + player_color
+        if (!cursor.ok) return false;
+        size_t recordEnd = cursor.pos;
+
+        out.append(data, recordStart, xboxEnd - recordStart);
+        out.append(data, fabEndPos, skinStart - fabEndPos);     // platform_chat_id + build_platform
+        out.append(data, skinStart, skinIdEnd - skinStart);     // skin_id
+        out.append(data, fabBegin, fabEnd - fabBegin);          // play_fab_id 放回 Skin 内
+        out.append(data, skinIdEnd, skinEnd - skinIdEnd);       // Skin 其余字段
+        out.append(data, skinEnd, recordEnd - skinEnd);         // 尾部 7 字节
+    }
+    if (cursor.pos != data.size()) out.append(data, cursor.pos, data.size() - cursor.pos);
+    data = std::move(out);
+    return true;
+}
+
+// player_skin(93)：2193 的 Skin 内带 play_fab_id，2225 移除。
+// olderToNewer = 2193 -> 2225：删除 skin_id 后的 play_fab_id；
+// newerToOlder = 2225 -> 2193：在 skin_id 后插入空字符串占位。
+bool playerSkinPlayFab(std::string& data, size_t payloadOffset, bool olderToNewer) {
+    size_t pos = payloadOffset;
+    pos += 16; // uuid
+    if (pos > data.size()) return false;
+    size_t begin = 0, end = 0;
+    PacketCursor cursor{data, pos};
+    if (!cursor.str(begin, end)) return false; // skin_id
+    if (olderToNewer) {
+        size_t fabBegin = 0, fabEnd = 0;
+        if (!cursor.str(fabBegin, fabEnd)) return false;
+        data.erase(fabBegin, fabEnd - fabBegin);
+    } else {
+        data.insert(cursor.pos, 1, '\0');
+    }
     return true;
 }
 
@@ -1920,8 +2065,8 @@ bool rewriteStartGameForOldClients(std::string& data, size_t payloadOffset, int 
 void translateOutboundPacket(std::string& data, int peerProtocol) {
     size_t   offset   = 0;
     uint32_t packetId = readVarUInt(data, offset);
-    if (packetId == 198) { // CameraPresets: 仅比 2193 老的客户端需要裁字段
-        if (peerProtocol < kServerProtocolValue) {
+    if (packetId == 198) { // CameraPresets: 仅比服务端基线老的客户端需要裁字段
+        if (peerProtocol < gServerProtocol.load(std::memory_order_relaxed)) {
             std::string original = data;
             if (stripCameraPresetTrailingFields(data, offset)) {
                 hookLog(
@@ -2187,6 +2332,9 @@ std::atomic_bool               gPtlLoaded{false};
 thread_local bool              gPtlDrop = false;
 // 当前包是否命中了至少一条改写规则（含 drop），用于性能计数里的「是否拷贝」。
 thread_local bool              gPtlRuleHit = false;
+// 每包实际经过的跳数（仅在 perfStatsEnabled 时累加）：用于评估多档链路的单包开销。
+std::atomic<uint64_t> gPtlHopPackets{0};
+std::atomic<uint64_t> gPtlHopTotal{0};
 
 // ============================================================================
 // 翻译性能计数（默认关闭）
@@ -2302,6 +2450,8 @@ void perfFlushWindow(int windowSeconds) {
     uint64_t dirCount[kPerfDirCount]{};
     uint64_t clsCount[kPerfClassCount]{};
     uint64_t clsNs[kPerfClassCount]{};
+    uint64_t hopPackets = gPtlHopPackets.exchange(0, std::memory_order_relaxed);
+    uint64_t hopTotal   = gPtlHopTotal.exchange(0, std::memory_order_relaxed);
 
     for (int d = 0; d < kPerfDirCount; ++d) {
         for (int c = 0; c < kPerfClassCount; ++c) {
@@ -2374,7 +2524,7 @@ void perfFlushWindow(int windowSeconds) {
     }
     hookLog(
         "[JERCPLD][PERF] window={}s pkts={} (s2c={} c2s={}) pps={:.1f} bytes={}B->{}B time={:.2f}ms tick={:.3f}% "
-        "| hop2168 n={} t={:.2f}ms | hop2169 n={} t={:.2f}ms | 2225 n={} t={:.2f}ms{}",
+        "| hop2168 n={} t={:.2f}ms | hop2169 n={} t={:.2f}ms | 2225 n={} t={:.2f}ms avg_hops={:.2f}{}",
         windowSeconds,
         totalCount,
         dirCount[0],
@@ -2390,6 +2540,7 @@ void perfFlushWindow(int windowSeconds) {
         static_cast<double>(clsNs[1]) / 1e6,
         clsCount[2],
         static_cast<double>(clsNs[2]) / 1e6,
+        hopPackets ? static_cast<double>(hopTotal) / static_cast<double>(hopPackets) : 0.0,
         tops.empty() ? std::string{} : (" | top: " + tops)
     );
 }
@@ -3672,7 +3823,7 @@ bool ptlArrayTransform(std::string& data, size_t payloadOffset, PtlRule const& r
 bool ptlBuiltin(std::string& data, size_t payloadOffset, std::string const& name, bool olderToNewer) {
     if (name == "add_player_passenger") {
         if (olderToNewer) return insertAddPlayerPassengerField(data);
-        return false; // TODO：反向需 2225 抓包
+        return removeAddPlayerPassengerField(data);
     }
     if (name == "level_chunk_skeleton") {
         if (olderToNewer) {
@@ -3684,7 +3835,10 @@ bool ptlBuiltin(std::string& data, size_t payloadOffset, std::string const& name
     }
     if (name == "player_list_fab") {
         if (olderToNewer) return translatePlayerList(data, payloadOffset);
-        return false; // TODO：反向需 2225 抓包
+        return translatePlayerListToOlder(data, payloadOffset);
+    }
+    if (name == "player_skin_fab") {
+        return playerSkinPlayFab(data, payloadOffset, olderToNewer);
     }
     if (name == "client_cache_force_off") {
         // 两个方向都需要：2169/2225 客户端上报 true 时，2193 服务端只发缓存哈希，
@@ -3804,7 +3958,7 @@ bool ptlApplyRules(
 bool isKnownBuiltin(std::string const& name) {
     static constexpr char const* kBuiltins[] = {
         "add_player_passenger", "level_chunk_skeleton", "player_list_fab",
-        "client_cache_force_off", "camera_presets_strip", "play_sound_to_2169",
+        "player_skin_fab", "client_cache_force_off", "camera_presets_strip", "play_sound_to_2169",
         "play_sound_to_2193", "pack_setting_change_guard", "transaction_to_2169",
         "transaction_to_2193", "player_auth_input_to_2193", "item_stack_response_to_2169",
         "subchunk_to_2169",
@@ -4296,7 +4450,9 @@ struct PtlHop {
     int to   = 0;
 };
 
-// 按已注册版本对建图，BFS 找最短路径；超过 3 档直接拒绝。
+// 按已注册版本对自动建图，BFS 找最短路径。
+// 不设固定跳数上限：seen 集合保证无环，最短路径天然不超过「版本节点数-1」跳，
+// 新增版本档只需注册相邻版本对，链路会自动延长。
 bool ptlFindPath(int from, int to, std::vector<PtlHop>& path, std::string& error) {
     if (from == to) return true;
     std::vector<int>              queue{from};
@@ -4318,10 +4474,6 @@ bool ptlFindPath(int from, int to, std::vector<PtlHop>& path, std::string& error
                 std::vector<int> chain;
                 for (int node = to; node != -1; node = prev[node]) chain.push_back(node);
                 std::reverse(chain.begin(), chain.end());
-                if (chain.size() - 1 > 3) {
-                    error = fmt::format("路径超过 3 档（{} 档）", chain.size() - 1);
-                    return false;
-                }
                 for (size_t i = 0; i + 1 < chain.size(); ++i) path.push_back({chain[i], chain[i + 1]});
                 return true;
             }
@@ -4348,6 +4500,74 @@ std::string ptlRouteSummary(int from, int to) {
     return fmt::format("hops={} [{}]", path.size(), hops);
 }
 
+// 启动校验：serverProtocol 必须是已加载版本对的端点、准入区间必须覆盖服务端，
+// 并打印「端点 -> 服务端」的实际路由链，确保配置切换基线后链路仍然成立。
+void logAndValidateRouting(ll::io::Logger& logger) {
+    int const server = gServerProtocol.load(std::memory_order_relaxed);
+    int const minP   = gAcceptMinProtocol.load(std::memory_order_relaxed);
+    int const maxP   = gAcceptMaxProtocol.load(std::memory_order_relaxed);
+
+    std::vector<int>         endpoints;
+    std::string              pairText;
+    {
+        std::shared_lock lock(gPtlMutex);
+        for (auto const& pair : gPtlPairs) {
+            endpoints.push_back(pair.a);
+            endpoints.push_back(pair.b);
+            if (!pairText.empty()) pairText += ',';
+            pairText += fmt::format("{}-{}", pair.a, pair.b);
+        }
+    }
+    std::sort(endpoints.begin(), endpoints.end());
+    endpoints.erase(std::unique(endpoints.begin(), endpoints.end()), endpoints.end());
+
+    if (endpoints.empty()) {
+        logger.error("[{}][PTL] 未加载任何版本对：跨版本客户端将直通，server={}", kModName, server);
+        return;
+    }
+    logger.info(
+        "[{}][PTL] 路由表 pairs=[{}] server={} accept={}..{}",
+        kModName,
+        pairText,
+        server,
+        minP,
+        maxP
+    );
+    if (minP > maxP) {
+        logger.error("[{}][PTL] 准入区间非法：acceptMin({}) > acceptMax({})", kModName, minP, maxP);
+    }
+    if (std::find(endpoints.begin(), endpoints.end(), server) == endpoints.end()) {
+        std::string list;
+        for (int endpoint : endpoints) {
+            if (!list.empty()) list += '/';
+            list += std::to_string(endpoint);
+        }
+        logger.error(
+            "[{}][PTL] serverProtocol={} 不是已加载版本对的端点（端点: {}），跨版本翻译会失败",
+            kModName,
+            server,
+            list
+        );
+    }
+    if (server < minP || server > maxP) {
+        logger.error(
+            "[{}][PTL] 准入区间 {}..{} 未覆盖 serverProtocol={}",
+            kModName,
+            minP,
+            maxP,
+            server
+        );
+    }
+    for (int endpoint : endpoints) {
+        std::string route = ptlRouteSummary(endpoint, server);
+        if (route.starts_with("no-route")) {
+            logger.error("[{}][PTL] 路由缺失 {} -> {}: {}", kModName, endpoint, server, route);
+        } else {
+            logger.info("[{}][PTL] route {} -> {} {}", kModName, endpoint, server, route);
+        }
+    }
+}
+
 void ptlTranslate(std::string& data, int from, int to, char const* tag) {
     gPtlDrop = false;
     if (from == to) return;
@@ -4359,6 +4579,10 @@ void ptlTranslate(std::string& data, int from, int to, char const* tag) {
         if (!ptlFindPath(from, to, path, error)) {
             hookLog("[JERCPLD][PTL][{}] 路由失败: {}", tag, error);
             return;
+        }
+        if (gPerfEnabled.load(std::memory_order_relaxed) && path.size() > 1) {
+            gPtlHopPackets.fetch_add(1, std::memory_order_relaxed);
+            gPtlHopTotal.fetch_add(path.size(), std::memory_order_relaxed);
         }
         {
             // 每条 (方向, 起止) 只记录一次，用于确认链式路由实际走了哪些档。
@@ -4590,6 +4814,7 @@ void maybeAutoReloadPtl() {
     }
     gPtlMtime = now;
     ptlLoadAll();
+    if (auto mod = ll::mod::NativeMod::current()) logAndValidateRouting(mod->getLogger());
     hookLog("[JERCPLD][PTL] 规则已自动重载（无在线会话）");
 }
 
@@ -5186,6 +5411,7 @@ public:
         logger.info("[{}] enabled (translation={})", kModName, mConfig.translationEnabled ? "ON" : "OFF");
         if (mConfig.translationEnabled) {
             ptlLoadAll();
+            logAndValidateRouting(logger);
             gPtlMtime = ptlDirMtime();
             installProtocolHooks();
         }

@@ -31,6 +31,8 @@ yarn-error.log*
 
 # 第三方依赖下载缓存（由 fetch-deps.ps1 重新获取）
 mod/JERCPLD.Mod/deps/
+# PTL 规则由 build-ptl.ps1 从 JERCPTL 生成
+mod/JERCPLD.Mod/PTL/
 third_party/Binaries/
 third_party/Cache/
 
